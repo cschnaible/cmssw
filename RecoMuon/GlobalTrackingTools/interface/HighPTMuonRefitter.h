@@ -107,6 +107,7 @@ class HighPTMuonRefitter {
 		// Make a vector<Trajectory> from a free trajectory state and a rechit list
 		// Uses propagation only - it assumes the FTS is the correct state
 		std::vector<Trajectory> trajFromFTS(
+					const Trajectory& traj,
 					const FreeTrajectoryState& fts, 
 					const ConstRecHitContainer& recHits) const;
 

@@ -22,6 +22,7 @@
 #include "DataFormats/Math/interface/AlgebraicROOTObjects.h"
 #include "RecoMuon/GlobalTrackingTools/interface/HighPTMuonUtilities.h"
 #include "RecoMuon/TrackingTools/interface/MuonUpdatorAtVertex.h"
+#include "TMath.h"
 
 //
 // Constructor
@@ -32,9 +33,12 @@ HighPTMuonUtilities::HighPTMuonUtilities(const edm::ParameterSet& par,
 			theService(service),
 			theBeamSpotInputTag(par.getParameter<edm::InputTag>("beamSpot"))
 {
+	edm::ParameterSet updatorPar = par.getParameter<edm::ParameterSet>("MuonUpdatorAtVertexParameters");
+	theUpdatorAtVtx = new MuonUpdatorAtVertex(updatorPar,service);
   thePropagatorName = par.getParameter<std::string>("Propagator");
 	theSelectorName = par.getParameter<std::string>("Selector");
 	factor = par.getParameter<double>("trackRankFactor");
+	curvPullCut = par.getParameter<double>("curvPullCut");
 	theBeamSpotToken = iC.consumes<reco::BeamSpot>(theBeamSpotInputTag);
 }
 
@@ -42,6 +46,7 @@ HighPTMuonUtilities::HighPTMuonUtilities(const edm::ParameterSet& par,
 // Destructor
 //
 HighPTMuonUtilities::~HighPTMuonUtilities() {
+	if (theUpdatorAtVtx) delete theUpdatorAtVtx;
 }
 
 //
@@ -60,18 +65,25 @@ HighPTMuonUtilities::updateMuonOnlyTraj(
 		const Trajectory& refitTraj,
 		const reco::Track& globalTrack) const {
 	
+	//std::cout << "\nHighPTMuonUtilities updateMuonOnlyTraj()\n" << std::endl;
 	std::pair<bool,reco::Track> refitTrackAtPCA = 
 		buildTrackFromTrajAtPCA(refitTraj, *beamSpot);
 	std::pair<bool,reco::Track> globalTrackAtPCA = 
 		buildTrackFromTrackAtPCA(globalTrack, *beamSpot);
 
-	if (!refitTrackAtPCA.first && !globalTrackAtPCA.first) {
-		std::cout << "Couldn't build track from trajectory or track from track at PCA to beam spot" << std::endl;
+	if (!refitTrackAtPCA.first || !globalTrackAtPCA.first) {
+		//std::cout << "Couldn't build track from trajectory or track from track at PCA to beam spot" << std::endl;
 		return FreeTrajectoryState();
 	}
 
 	std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError> refitUpdateParCov = 
 		KFupdateTrackWithVtx(refitTrackAtPCA.second,globalTrackAtPCA.second);
+	/*
+	std::cout << "par" <<std::endl;
+	std::cout << refitUpdateParCov.first.vector() << std::endl;
+	std::cout << "cov" <<std::endl;
+	std::cout << refitUpdateParCov.second.matrix() << std::endl;
+	*/
 
 	FreeTrajectoryState updatedFTSatVtx = 
 		buildFTSfromParCov(refitUpdateParCov, globalTrackAtPCA.second);
@@ -94,22 +106,57 @@ HighPTMuonUtilities::buildTrackFromTrajAtPCA(
   MuonPatternRecoDumper debug;
   
   TrajectoryStateOnSurface innerTSOS = trajectory.geometricalInnermostState();
+	//printTSOS(innerTSOS);
   
+	if (!innerTSOS.isValid()) {
+		//std::cout << "\ninnerTSOS is not valid in buildTrackFromTrajAtPCA()\n" << std::endl;
+		return std::make_pair(false,reco::Track());
+	}
+
   LogTrace(metname) << "Propagate to PCA...";
-	FreeTrajectoryState ftsAtVtx = 
-		theService->propagator(thePropagatorName)->propagate(*innerTSOS.freeState(), beamSpot);  
+	//FreeTrajectoryState ftsAtVtx = 
+		//theService->propagator(thePropagatorName)->propagate(*innerTSOS.freeState(), beamSpot);  
+	std::pair<bool,FreeTrajectoryState>
+		extrapolationResult = theUpdatorAtVtx->propagate(innerTSOS,beamSpot);
+
+	FreeTrajectoryState ftsAtVtx;
+ if(extrapolationResult.first)
+    ftsAtVtx = extrapolationResult.second;
+  else{    
+		//std::cout << "\nExtrapolation failed in buildTrackFromTrajAtPCA()?\n" << std::endl;
+    if(TrackerBounds::isInside(innerTSOS.globalPosition())){
+      //LogInfo(metname) << "Track in the Tracker: taking the innermost state instead of the state at PCA";
+      ftsAtVtx = *innerTSOS.freeState();
+    }
+    else{
+      //if ( theAllowNoVtxFlag ) {
+      if (true) {
+        //LogInfo(metname) << "Propagation to PCA failed, taking the innermost state instead of the state at PCA";
+        ftsAtVtx = *innerTSOS.freeState();
+      } else {
+        //LogInfo(metname) << "Stand Alone track: this track will be rejected";
+        return std::pair<bool,reco::Track>(false,reco::Track());
+      }
+    }
+  }
+
     
   LogTrace(metname) << "TSOS after the extrapolation at vtx";
-  LogTrace(metname) << debug.dumpFTS(ftsAtVtx);
+	//std::cout << "TSOS after the extrapolation at vtx" << std::endl;
+	//std::cout << debug.dumpFTS(ftsAtVtx) << std::endl;
   
-  GlobalPoint pca = ftsAtVtx.position();
+  GlobalPoint pca = extrapolationResult.second.position();
   math::XYZPoint persistentPCA(pca.x(),pca.y(),pca.z());
-  GlobalVector p = ftsAtVtx.momentum();
+  GlobalVector p = extrapolationResult.second.momentum();
   math::XYZVector persistentMomentum(p.x(),p.y(),p.z());
 
   bool bon = true;
   if(fabs(theService->magneticField()->inTesla(GlobalPoint(0,0,0)).z()) < 0.01) bon=false;   
   double ndof = trajectory.ndof(bon);
+	
+	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA fts q/p = " << ftsAtVtx.signedInverseMomentum() << std::endl;
+	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA() position = " << ftsAtVtx.position() << std::endl;
+	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA() momentum = " << ftsAtVtx.momentum() << std::endl;
   
 	// build the track
   reco::Track track(
@@ -119,6 +166,7 @@ HighPTMuonUtilities::buildTrackFromTrajAtPCA(
 			persistentMomentum,
 			ftsAtVtx.charge(),
 			ftsAtVtx.curvilinearError());
+	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA track q/p = " << track.qoverp() << std::endl;
 	
   return std::make_pair(true,track);
 }
@@ -166,6 +214,14 @@ HighPTMuonUtilities::buildFTSfromParCov(
 	
 	CurvilinearTrajectoryParameters refitUpdatePar = refitUpdateParCov.first;
 	CurvilinearTrajectoryError refitUpdateCov = refitUpdateParCov.second;
+	if (!refitUpdateCov.posDef()) {
+		//std::cout << "Updated covariance is not positive definite" << std::endl;
+		return FreeTrajectoryState();
+	}
+	if (refitUpdatePar.vector()[0]!=refitUpdatePar.vector()[0]) {
+		//std::cout << "q/p is nan!" << std::endl;
+		return FreeTrajectoryState();
+	}
 
   GlobalPoint globalTrackPCA = GlobalPoint(
 			globalTrackAtPCA.referencePoint().x(),
@@ -189,6 +245,15 @@ HighPTMuonUtilities::buildFTSfromParCov(
 			globalTrackPCA, refitTrackP, refitUpdatePar.charge(), &*theService->magneticField());
 
 	FreeTrajectoryState ftsUpdated(refitTrajPar, refitUpdateCov);
+	/*
+	if (ftsUpdated.hasError()) {
+		std::cout << "HighPTMuonUtilities buildFTSfromParCov() ftsUpdated has Error (this is good)" << std::endl;
+	}
+	else {
+		std::cout << "HighPTMuonUtilities buildFTSfromParCov() ftsUpdated does not have Error (this is bad)" << std::endl;
+	}
+	*/
+
 	return ftsUpdated;
 
 }
@@ -324,6 +389,7 @@ HighPTMuonUtilities::KFupdateTrackWithVtx(
 	std::cout << "Mu-only covariance before update" << std::endl;
 	std::cout << P << std::endl;
 	*/
+	/*
 	//std::cout << "Mu-only chi2, nhits, ndof" << std::endl;
 	//std::cout << refit.chi2() << " " << refit.numberOfValidHits() << " " << refit.ndof() << std::endl;
 	//std::cout << "Residual" << std::endl;
@@ -341,6 +407,7 @@ HighPTMuonUtilities::KFupdateTrackWithVtx(
 	//std::cout << K*H*P << std::endl;
 	//std::cout << "Covariance update" << std::endl;
 	//std::cout << -K*H*P << std::endl;
+	*/
 	/*
 	std::cout << "Updated Mu-only + vtx parameters" << std::endl;
 	std::cout << X_u << std::endl;
@@ -389,6 +456,8 @@ HighPTMuonUtilities::KFupdateTrackWithVtx(
 	std::cout << refit.chi2() + vtxChi2 << std::endl;
 	*/
 
+	//std::cout << "*************" << std::endl;
+
 	return std::make_pair(params,cov);
 }
 
@@ -405,54 +474,28 @@ HighPTMuonUtilities::select(
 	//std::cout << "Selector Name " << theSelectorName << std::endl;
 
 	if (theSelectorName=="dxy")
-		bestPair = selectBasedOnDxy(refits, glbTrack);
+		bestPair = selectBasedOnDxyPull(refits, glbTrack);
 	else if (theSelectorName=="trackRank")
-		bestPair = selectBasedOnTrackRank(refits);
+		bestPair = selectBasedOnTrackRank(refits,glbTrack);
+	else if (theSelectorName=="curvPull")
+		bestPair = selectBasedOnCurvPull(refits,glbTrack);
+	else if (theSelectorName=="TEST")
+		bestPair = selectBasedOnTEST(refits,glbTrack);
 	else
 		std::cout << "Not a valid selector" << std::endl;
-	return bestPair;
-}
-
-std::pair<Trajectory,Trajectory>
-HighPTMuonUtilities::selectBasedOnDxy(
-		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-		const reco::Track& glbTrack) const
-{
-	//std::cout << "\nChoosing based on min(|dxy_r - dxy_g|)\n" << std::endl;
-	int i(0);
-	double bestDxy = 999.;
-	double refDxy = glbTrack.dxy(*beamSpot);
-	std::pair<Trajectory,Trajectory> bestPair;
-	for (auto refit : refits) {
-		Trajectory muOnlyTraj = refit.first;
-		Trajectory muOnlyUpdateTraj = refit.second;
-		// skip empty trajectories
-		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
-			i++;
-			continue;
-		}
-		else {
-			std::pair<bool,reco::Track> muOnlyTrack = 
-				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
-			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
-				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
-
-			double thisDxy = muOnlyUpdateTrack.second.dxy(*beamSpot);
-			//std::cout << "a dxy " << thisDxy << std::endl;
-			if (abs(thisDxy-refDxy) < abs(bestDxy-refDxy)) {
-				bestDxy = thisDxy;
-				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
-			}
-			i++;
-		}
+	/*
+	if (bestPair.first.empty() || bestPair.second.empty()) {
+		std::cout << "************************************" << std::endl;
+		std::cout << "Trajectories are empty after selector() this is a bad thing" << std::endl;
+		std::cout << "************************************" << std::endl;
 	}
-	//std::cout << "best dxy " << bestDxy << std::endl;
+	*/
 	return bestPair;
 }
-
 std::pair<Trajectory,Trajectory>
 HighPTMuonUtilities::selectBasedOnTrackRank(
-		const std::vector< std::pair<Trajectory,Trajectory> >& refits) const
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Track& glbTrack) const
 {
 	//std::cout << "\nChoosing trajectory based on max track rank" << std::endl;
 	//std::cout << "nHits * " << factor << " - chi^2\n" << std::endl;
@@ -473,9 +516,12 @@ HighPTMuonUtilities::selectBasedOnTrackRank(
 			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
 				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
 
+			if (!muOnlyTrack.first or !muOnlyUpdateTrack.first) continue;
+			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbTrack.qoverp())/glbTrack.qoverp());
+			if (thisCurvPull > curvPullCut) continue;
 			int nHits = muOnlyTraj.foundHits();
-			double thisRank = nHits*factor - muOnlyTraj.chiSquared();
-			//std::cout << "a track rank " << thisRank << std::endl;
+			double thisRank = nHits*factor - muOnlyUpdateTraj.chiSquared();
+			//std::cout << "thisRank " << thisRank << std::endl;
 			if (thisRank > bestRank) {
 				bestRank = thisRank;
 				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
@@ -483,6 +529,196 @@ HighPTMuonUtilities::selectBasedOnTrackRank(
 			i++;
 		}
 	}
-	//std::cout << "best track rank " << bestRank << std::endl;
+	//std::cout << "bestRank " << bestRank << std::endl;
 	return bestPair;
+}
+
+//
+// Smallest |(k_ref - k_glb)/k_glb|
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnCurvPull(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Track& glbTrack) const
+{
+	//std::cout << "\nChoosing trajectory based on smallest curvature pull" << std::endl;
+	int i(0);
+	double bestPull = 999.;
+	std::pair<Trajectory,Trajectory> bestPair;
+	for (auto refit : refits) {
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			i++;
+			continue;
+		}
+		else if (muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
+			i++;
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
+
+			if (!muOnlyUpdateTrack.first) continue;
+			double thisPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbTrack.qoverp())/glbTrack.qoverp());
+			//std::cout << "thisPull " << thisPull << std::endl;
+			if (thisPull < bestPull) {
+				bestPull = thisPull;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+			i++;
+		}
+	}
+	//std::cout << "bestPull " << bestPull << std::endl;
+	return bestPair;
+}
+
+//
+// curvature pull < curvPullCut and smallest dxy
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnDxyPull(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Track& glbTrack) const
+{
+	//std::cout << "\nChoosing trajectory based on smallest curvature pull" << std::endl;
+	int i(0);
+	double bestDxyPull = 999.;
+	double refDxy = glbTrack.dxy(*beamSpot);
+	std::pair<Trajectory,Trajectory> bestPair;
+	for (auto refit : refits) {
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			i++;
+			continue;
+		}
+		else if (muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
+			i++;
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyTrack = 
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
+
+			if (!muOnlyTrack.first or !muOnlyUpdateTrack.first) continue;
+			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbTrack.qoverp())/glbTrack.qoverp());
+			if (thisCurvPull > curvPullCut) continue;
+			double thisDxy = muOnlyTrack.second.dxy(*beamSpot);
+			double thisDxyPull = fabs((thisDxy - refDxy)/refDxy);
+			//std::cout << "thisDxyPull " << thisDxyPull << std::endl;
+			if (thisDxyPull < bestDxyPull) {
+				bestDxyPull = thisDxyPull;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+			i++;
+		}
+	}
+	//std::cout << "bestDxyPull " << bestDxyPull << std::endl;
+	return bestPair;
+}
+
+//
+// Testing
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnTEST(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Track& glbTrack) const
+{
+	std::cout << "\nChoosing trajectory based on TEST" << std::endl;
+	int i(0);
+	double bestDxyPull = 999;
+	double bestCurvPull = 999;
+	double bestNhits = -1;
+	double bestChi2 = 9999;
+	double bestdptopt = 999;
+	double bestprob = 0.;
+	std::pair<Trajectory,Trajectory> bestPair;
+	double refDxy = glbTrack.dxy(*beamSpot);
+	for (auto refit : refits) {
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			i++;
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyTrack = 
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
+
+			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbTrack.qoverp())/glbTrack.qoverp());
+			double thisDxy = muOnlyTrack.second.dxy(*beamSpot);
+			double thisDxyPull = fabs((thisDxy - refDxy)/refDxy);
+			double thisChi2 = muOnlyUpdateTrack.second.chi2();
+			double thisdptopt = muOnlyUpdateTrack.second.ptError()/muOnlyUpdateTrack.second.pt();
+			double thisprob = -std::log(TMath::Prob(muOnlyUpdateTrack.second.chi2(),muOnlyUpdateTrack.second.ndof()+4));
+			int thisNhits = muOnlyUpdateTraj.measurements().size();
+
+			std::cout << "a dxy pull " << thisDxyPull
+				<< " a curv pull " << thisCurvPull 
+				<< " a chi2 " << thisChi2
+				<< " a hits " << thisNhits
+				<< " a dpt/pt " << thisdptopt
+				<< " a prob " << thisprob
+				<< std::endl;
+
+			if (thisCurvPull > curvPullCut) continue;
+			if (thisDxyPull < bestDxyPull) {
+				bestDxyPull = thisDxyPull;
+				bestCurvPull = thisCurvPull;
+				bestNhits = thisNhits;
+				bestChi2 = thisChi2;
+				bestdptopt = thisdptopt;
+				bestprob = thisprob;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+			i++;
+		}
+	}
+	std::cout << "chosen dxy diff " << bestDxyPull
+		<< " chosen pull " << bestCurvPull
+		<< " chosen chi2 " << bestChi2
+		<< " chosen hits " << bestNhits
+		<< " chosen dpt/pt " << bestdptopt
+		<< " chosen prob " << bestprob
+		<< std::endl;
+	return bestPair;
+}
+void HighPTMuonUtilities::printTSOS(const TrajectoryStateOnSurface& tsos) const {
+	CurvilinearTrajectoryParameters curvil(tsos.globalPosition(),
+			tsos.globalMomentum(), tsos.charge());
+  std::cout
+	  << "\nCurviliner Parameters\n" <<
+	  curvil.vector()
+	  << "\nCurvilinear Error\n" <<
+	  tsos.curvilinearError().matrix()
+	  << "\n\nGlobal position\n" << 
+	  tsos.globalPosition()
+	  << "\nGlobal Momemtum\n" << 
+	  tsos.globalMomentum()
+	  << "\n\npt = " << std::sqrt(tsos.globalMomentum().x()*tsos.globalMomentum().x() + tsos.globalMomentum().y()*tsos.globalMomentum().y()) 
+	  << "\n\nGlobal Direction\n" <<
+	  tsos.globalDirection()
+	  << "\nCartesian Error\n" << 
+	  tsos.cartesianError().matrix()
+	  << "\n\nLocal Parameters\n" <<
+	  tsos.localParameters().vector()
+	  << "\nLocal Error\n" <<
+	  tsos.localError().matrix()
+	  << "\nLocal Position\n" <<
+	  tsos.localPosition()
+	  << "\nLocal Momentum\n" <<
+	  tsos.localMomentum()
+	  << "\nLocal Direction\n" <<
+	  tsos.localDirection()
+  << std::endl;
 }

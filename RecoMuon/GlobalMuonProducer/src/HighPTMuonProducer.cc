@@ -188,6 +188,7 @@ void HighPTMuonProducer::produce(Event& event, const EventSetup& eventSetup) {
 					bestPair = thisGlobalCombRefits.front();
 				else
 					bestPair = theHighPTUtilities->select(thisGlobalCombRefits, *track);
+				if (bestPair.first.empty() || bestPair.second.empty()) continue;
 				
 				Trajectory *refit = new Trajectory(bestPair.first);
 				trajectories.push_back(refit);

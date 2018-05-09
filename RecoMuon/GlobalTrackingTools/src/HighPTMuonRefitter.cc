@@ -200,7 +200,8 @@ void HighPTMuonRefitter::setServices(const EventSetup& setup) {
 //
 // build a combined tracker-muon trajectory
 //
-pair<Trajectory,Trajectory> HighPTMuonRefitter::refit(
+pair<Trajectory,Trajectory>
+HighPTMuonRefitter::refit(
 		const reco::Track& globalTrack, 
 		const std::string& theMuonHitsOption,
 		const TrackerTopology *tTopo,
@@ -227,10 +228,13 @@ pair<Trajectory,Trajectory> HighPTMuonRefitter::refit(
     ConstRecHitContainer trackerRecHits = removeMuonHits(allRecHitsTemp);
     vector<Trajectory> trackerOnlyTraj = transform(globalTrack,track,trackerRecHits);
     if (trackerOnlyTraj.empty()) {
-      LogDebug(theCategory) << "No Track refitted!" << endl;
+      LogDebug(theCategory) << "No Tracker Track refitted!" << endl;
       return std::make_pair(Trajectory(),Trajectory());
     }
-    return std::make_pair(trackerOnlyTraj.front(),Trajectory());
+	
+		vector<Trajectory> trackerTrajSM = theSmoother->trajectories(trackerOnlyTraj.front());
+		if (!trackerTrajSM.empty()) return std::make_pair(trackerTrajSM.front(),Trajectory());
+		else return std::make_pair(trackerOnlyTraj.front(),Trajectory());
   }
 
   // Select the Muon RecHits
@@ -252,19 +256,25 @@ pair<Trajectory,Trajectory> HighPTMuonRefitter::refit(
 	// Update mu-only trajectory with vtx
 	FreeTrajectoryState updatedFTSatVtx = 
 		theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj.front(), globalTrack);
+	if (!updatedFTSatVtx.hasError()) return std::make_pair(Trajectory(),Trajectory());
 	// Make trajectory
 	vector<Trajectory> muonOnlyVtxTraj = 
-		trajFromFTS(updatedFTSatVtx, muonRecHitsToRefit);
+		trajFromFTS(muonOnlyTraj.front(), updatedFTSatVtx, muonRecHitsToRefit);
 
 	if (!muonOnlyVtxTraj.size()) {
 		return std::make_pair(Trajectory(), Trajectory());
 	}
 	else {
-		//std::cout << "After recalculating chi2" << std::endl;
-		//std::cout << muonOnlyVtxTraj.front().chiSquared() << std::endl;
-		//std::cout << std::endl;
-
-		return std::make_pair(muonOnlyTraj.front(), muonOnlyVtxTraj.front());
+		if (!muonOnlyVtxTraj.front().isValid() or !muonOnlyTraj.front().isValid()) {
+			return std::make_pair(Trajectory(), Trajectory());
+		}
+		else {
+			//std::cout << "After recalculating chi2" << std::endl;
+			//std::cout << muonOnlyVtxTraj.front().chiSquared() << std::endl;
+			//std::cout << std::endl;
+			//printTrajectories(muonOnlyVtxTraj.front(),false);
+			return std::make_pair(muonOnlyTraj.front(), muonOnlyVtxTraj.front());
+		}
 	}
 
 }
@@ -434,7 +444,7 @@ HighPTMuonRefitter::ConstRecHitContainer HighPTMuonRefitter::removeMuonHits(cons
     //Check that this is a Muon hit that we're toying with -- else pass on this because the hacker is a moron / not careful
 
     if (id.det() == DetId::Muon) {
-    continue;
+			continue;
     }
     results.push_back(*it);
   }
@@ -1043,10 +1053,11 @@ vector<Trajectory> HighPTMuonRefitter::transform(const reco::Track& newTrack,
 //
 vector<Trajectory>
 HighPTMuonRefitter::trajFromFTS(
+		const Trajectory& muonOnlyTraj,
 		const FreeTrajectoryState& ftsAtVtx, const ConstRecHitContainer& recHits) const {
 
 	// Need a non-const version in case order needs to change
-	ConstRecHitContainer recHitsToUse = recHits;
+	TransientTrackingRecHit::ConstRecHitContainer recHitsToUse = recHits;
 	
 	// Make trajectory
 	PropagationDirection propDir = alongMomentum;
@@ -1073,7 +1084,8 @@ HighPTMuonRefitter::trajFromFTS(
 	// Propagate FTS to first RecHit surface
 	//
 	TrajectoryStateOnSurface firstTSOS = 
-		theService->propagator(thePropagatorName)->propagate(ftsAtVtx, *((*recHitsToUse.front()).surface()));
+		theService->propagator(thePropagatorName)->propagate(ftsAtVtx, recHitsToUse.front()->det()->surface());
+		//theService->propagator(thePropagatorName)->propagate(ftsAtVtx, *((*recHitsToUse.front()).surface()));
 	if (!firstTSOS.isValid()) {
 		return std::vector<Trajectory>();
 	}
@@ -1083,28 +1095,45 @@ HighPTMuonRefitter::trajFromFTS(
 	TrajectoryStateOnSurface thisTSOS, prevTSOS;
 	int i(0);
   for (auto ihit : recHitsToUse) {
+
 		const TransientTrackingRecHit & hit = (*ihit);
+
 		if (i==0) {
 			thisTSOS=firstPredTSOS;
 		}
 		else {
-			thisTSOS = theService->propagator(thePropagatorName)->propagate(prevTSOS, *(hit.surface()));
+			//thisTSOS = theService->propagator(thePropagatorName)->propagate(prevTSOS, *(hit.surface()));
+			thisTSOS = theService->propagator(thePropagatorName)->propagate(prevTSOS, ihit->det()->surface());
 		}
-		//if (theEstimator->estimate(thisTSOS, hit).first){
+
 		if (thisTSOS.isValid()){
-			double thisEstimate;
-			thisEstimate = theEstimator->estimate(thisTSOS, hit).second;
-			TrajectoryMeasurement thisTM = TrajectoryMeasurement(thisTSOS, ihit, thisEstimate);
+
+			std::pair<bool,double> thisEstimate = theEstimator->estimate(thisTSOS, hit);
+			if (!thisEstimate.first) {
+				//std::cout << "HighPTMuonRefitter trajFromFTS thisEstimate.first is false" << std::endl;
+				return std::vector<Trajectory>();
+			}
+
+			TrajectoryMeasurement thisMuonOnlyTM;
+			for (auto tmpMuonOnlyTM : muonOnlyTraj.measurements()) {
+				if (tmpMuonOnlyTM.recHit()->rawId()==hit.rawId()) {
+					thisMuonOnlyTM=tmpMuonOnlyTM;
+					break;
+				}
+			}
+
+			TrajectoryMeasurement thisTM = 
+				TrajectoryMeasurement(thisTSOS, ihit, thisEstimate.second, thisMuonOnlyTM.layer());
+
 			traj.push(thisTM);
 			prevTSOS = thisTSOS;
 			i++;
 		}
 		else {
-			std::cout << "HighPTMuonRefitter trajFromFTS() thisTSOS is not valid" << std::endl;
+			//std::cout << "HighPTMuonRefitter trajFromFTS() thisTSOS is not valid" << std::endl;
 			return std::vector<Trajectory>();
 		}
 	}
-	//
 	return std::vector<Trajectory>(1,std::move(traj));
 }
 
@@ -1112,7 +1141,7 @@ HighPTMuonRefitter::trajFromFTS(
 /*
  *
  * Printing Functions
- * (should eventually convert all this to LogInfo())
+ * (should eventually convert all this to LogInfo() or LogTrace() or whatever)
  *
  *
  */

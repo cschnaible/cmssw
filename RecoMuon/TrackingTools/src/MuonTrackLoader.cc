@@ -717,9 +717,11 @@ pair<bool,reco::Track> MuonTrackLoader::buildTrackAtPCA(const Trajectory& trajec
     else{
       if ( theAllowNoVtxFlag ) {
         LogInfo(metname) << "Propagation to PCA failed, taking the innermost state instead of the state at PCA";
+				//std::cout << "Propagation to PCA failed, taking the innermost state instead of the state at PCA" << std::endl;
         ftsAtVtx = *innerTSOS.freeState();
       } else {
-        LogInfo(metname) << "Stand Alone track: this track will be rejected";
+        LogInfo(metname) << "Propagation to PCA failed, Stand Alone track: this track will be rejected";
+				//std::cout << "Stand Alone track: this track will be rejected" <<std::endl;
         return pair<bool,reco::Track>(false,reco::Track());
       }
     }

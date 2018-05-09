@@ -59,10 +59,12 @@ class HighPTMuonUtilities {
 
     const edm::Event* theEvent;
     const MuonServiceProxy *theService;
+		MuonUpdatorAtVertex *theUpdatorAtVtx;
 
 		std::string thePropagatorName;
 		std::string theSelectorName;
 		double factor;
+		double curvPullCut;
 
 		edm::EDGetTokenT<reco::BeamSpot> theBeamSpotToken;
 		edm::InputTag theBeamSpotInputTag;
@@ -79,11 +81,22 @@ class HighPTMuonUtilities {
     std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError> KFupdateTrackWithVtx(
 				const reco::Track &refit, const reco::Track &glbTrack) const;
 
-		std::pair<Trajectory,Trajectory> selectBasedOnDxy(
+		std::pair<Trajectory,Trajectory> selectBasedOnDxyPull(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
 			const reco::Track& glbTrack) const;
 
 		std::pair<Trajectory,Trajectory> selectBasedOnTrackRank(
-				const std::vector< std::pair<Trajectory,Trajectory> >& refits) const;
+				const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+				const reco::Track& glbTrack) const;
+
+		std::pair<Trajectory,Trajectory> selectBasedOnCurvPull(
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Track& glbTrack) const;
+
+		std::pair<Trajectory,Trajectory> selectBasedOnTEST(
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Track& glbTrack) const;
+
+		void printTSOS(const TrajectoryStateOnSurface& thisTSOS) const;
 };
 #endif
