@@ -24,12 +24,16 @@
 
 #include "DataFormats/MuonReco/interface/MuonTrackLinks.h"
 #include "DataFormats/MuonReco/interface/MuonFwd.h"
+#include "DataFormats/MuonReco/interface/Muon.h"
 #include "TrackingTools/PatternTools/interface/TrajTrackAssociation.h"
 #include "DataFormats/TrackReco/interface/TrackToTrackMap.h"
 #include "DataFormats/TrackerCommon/interface/TrackerTopology.h"
 #include "Geometry/Records/interface/IdealGeometryRecord.h"
 #include "DataFormats/Common/interface/ValueMap.h"
 #include "DataFormats/Math/interface/AlgebraicROOTObjects.h"
+#include "DataFormats/Candidate/interface/Candidate.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticle.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticleFwd.h"
 
 typedef edm::ValueMap<reco::DYTInfo> DYTestimators;
 
@@ -55,7 +59,12 @@ class HighPTMuonProducer : public edm::stream::EDProducer<> {
 
 	/// STA Label
 	edm::InputTag theGLBCollectionLabel;
+	edm::InputTag theRECOMuonCollectionLabel;
+	edm::InputTag theGENParticleCollectionLabel;
 	edm::EDGetTokenT<reco::TrackCollection> glbMuonsToken;
+	edm::EDGetTokenT< std::vector<reco::Muon> > recoMuonsToken;
+	edm::EDGetTokenT< std::vector<reco::GenParticle> > genParticlesToken;
+	double dRcut;
 	edm::EDGetTokenT<std::vector<Trajectory> > glbMuonsTrajToken;
 
 	/// the event setup proxy, it takes care the services update

@@ -10,6 +10,8 @@
 #include "DataFormats/Common/interface/OrphanHandle.h"
 #include "DataFormats/MuonReco/interface/MuonFwd.h"
 #include "DataFormats/BeamSpot/interface/BeamSpot.h"
+#include "DataFormats/MuonReco/interface/MuonFwd.h"
+#include "DataFormats/MuonReco/interface/Muon.h"
 
 #include "FWCore/Utilities/interface/InputTag.h"
 
@@ -53,7 +55,8 @@ class HighPTMuonUtilities {
 
 		std::pair<Trajectory,Trajectory> select(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Track& glbTrack) const;
+			const reco::Muon& glbTrack) const;
+			//const reco::Track& glbTrack) const;
 
 	private:
 
@@ -83,20 +86,32 @@ class HighPTMuonUtilities {
 
 		std::pair<Trajectory,Trajectory> selectBasedOnDxyPull(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Track& glbTrack) const;
+			const reco::Muon& glbTrack) const;
+			//const reco::Track& glbTrack) const;
 
 		std::pair<Trajectory,Trajectory> selectBasedOnTrackRank(
-				const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-				const reco::Track& glbTrack) const;
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Muon& glbTrack) const;
+			//const reco::Track& glbTrack) const;
 
 		std::pair<Trajectory,Trajectory> selectBasedOnCurvPull(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Track& glbTrack) const;
+			const reco::Muon& glbTrack) const;
+			//const reco::Track& glbTrack) const;
 
 		std::pair<Trajectory,Trajectory> selectBasedOnTEST(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Track& glbTrack) const;
+			const reco::Muon& glbTrack) const;
+			//const reco::Track& glbTrack) const;
+
+    //std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError> combine(
+		void combine(const reco::Track &tracker, const reco::Track &refit) const;
+
 
 		void printTSOS(const TrajectoryStateOnSurface& thisTSOS) const;
+		template<class T> void printTrack(const T& track, const std::string& name) const;
+		template<class T> void printComb(const T& track, const Trajectory& traj, const std::string& name, const int& nHits, const int& hitOption) const;
+		std::string hitMaskPrint(const int& nHits, const int& hitOption) const;
+
 };
 #endif

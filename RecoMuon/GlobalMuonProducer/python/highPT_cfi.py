@@ -10,6 +10,9 @@ highPTMuons = cms.EDProducer("HighPTMuonProducer",
 	#    InputTag MuonCollectionLabel = standAloneMuons:UpdatedAtVtx
 	MuonServiceProxy,
 	MuonCollectionLabel = cms.InputTag("globalMuons"),
+	RecoMuonCollectionLabel = cms.InputTag("muons"),
+	GenParticleCollectionLabel = cms.InputTag("genParticles"),
+	dRcut = cms.double(0.3),
 	Refits = cms.vstring(
 			'default', 
 			'firstHit', 
