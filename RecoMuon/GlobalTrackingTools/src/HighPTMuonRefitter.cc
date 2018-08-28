@@ -63,6 +63,9 @@
 #include "DataFormats/TrackerCommon/interface/TrackerTopology.h"
 #include "Geometry/Records/interface/IdealGeometryRecord.h"
 
+#include "DataFormats/SiPixelDetId/interface/PixelSubdetector.h"
+#include "DataFormats/SiStripDetId/interface/StripSubdetector.h"
+
 #include "DataFormats/TrackReco/interface/Track.h"
 #include "DataFormats/TrackReco/interface/TrackExtraFwd.h"
 #include "RecoMuon/GlobalTrackingTools/interface/DynamicTruncation.h"
@@ -130,7 +133,8 @@ HighPTMuonRefitter::HighPTMuonRefitter(const edm::ParameterSet& par,
   dytInfo        = new reco::DYTInfo();
 
   printStuff = par.getParameter<bool>("printStuff");
-
+	nIterations = par.getParameter<int>("nIterations");
+	theTrackForUpdating = par.getParameter<string>("trackForUpdating");
 
   if (par.existsAs<double>("RescaleErrorFactor")) {
     theRescaleErrorFactor = par.getParameter<double>("RescaleErrorFactor");
@@ -203,6 +207,7 @@ void HighPTMuonRefitter::setServices(const EventSetup& setup) {
 pair<Trajectory,Trajectory>
 HighPTMuonRefitter::refit(
 		const reco::Track& globalTrack, 
+		const reco::Track& innerTrack, 
 		const std::string& theMuonHitsOption,
 		const TrackerTopology *tTopo,
 		const int& nHits,
@@ -231,18 +236,46 @@ HighPTMuonRefitter::refit(
       LogDebug(theCategory) << "No Tracker Track refitted!" << endl;
       return std::make_pair(Trajectory(),Trajectory());
     }
-	
-		vector<Trajectory> trackerTrajSM = theSmoother->trajectories(trackerOnlyTraj.front());
-		if (!trackerTrajSM.empty()) return std::make_pair(trackerTrajSM.front(),Trajectory());
-		else return std::make_pair(trackerOnlyTraj.front(),Trajectory());
+		std::vector<Trajectory> trackerOnlyTraj_final;
+		// Do second refit
+		if (nIterations==0) {
+			trackerOnlyTraj_final = trackerOnlyTraj;
+		} else {
+			int iter=0;
+			while (iter < nIterations) {
+				iter++;
+				std::vector<Trajectory> trackerOnlyTraj_prev;
+				if (iter==1) trackerOnlyTraj_prev = trackerOnlyTraj;
+				else trackerOnlyTraj_prev = trackerOnlyTraj_final;
+				trackerOnlyTraj_final = 
+					transform_again(*(trackerOnlyTraj_prev.front().geometricalInnermostState().freeState()),trackerRecHits);
+
+				if (!trackerOnlyTraj_final.size()) {
+					LogTrace(theCategory) << "No refitted Tracks... " << endl;
+					return std::make_pair(trackerOnlyTraj.front(),Trajectory());
+				} else {
+					LogTrace(theCategory) << "Refitted pt: " 
+						<< trackerOnlyTraj_final.front().firstMeasurement().updatedState().globalParameters().momentum().perp() << endl;
+				}
+
+			}
+		}
+		return std::make_pair(trackerOnlyTraj_final.front(),Trajectory());
   }
 
   // Select the Muon RecHits
-  ConstRecHitContainer muonRecHitsTmp = applyMuonHitsOption(globalTrack,track,allRecHitsTemp,theMuonHitsOption,nHits,hitPattern,hitMap);
+  ConstRecHitContainer muonRecHitsTmp = 
+		applyMuonHitsOption(globalTrack,track,allRecHitsTemp,theMuonHitsOption,nHits,hitPattern,hitMap);
+
+	// Just in case the combinatoric picky set of hits is empty
+	if (muonRecHitsTmp.size()<1) {
+		return std::make_pair(Trajectory(),Trajectory());
+	}
+
   // Remove Tracker RecHits
   ConstRecHitContainer muonRecHitsToRefit = removeTrackerHits(muonRecHitsTmp);
 
-  // Obtain the Trajectory
+  // Do first refit
   vector<Trajectory> muonOnlyTraj = transform(globalTrack,track,muonRecHitsToRefit);
 
   if (!muonOnlyTraj.size()) {
@@ -253,19 +286,73 @@ HighPTMuonRefitter::refit(
 			<< muonOnlyTraj.front().firstMeasurement().updatedState().globalParameters().momentum().perp() << endl;
   }
 
+	// Refit glb or inner track with just pixel hits
+	reco::Track trackForUpdating = reco::Track();
+	if (theTrackForUpdating=="global") 
+		trackForUpdating = globalTrack;
+	else if (theTrackForUpdating=="inner") 
+		trackForUpdating = innerTrack;
+	// does not work yet. turns out switching between global and inner tracks does nothing.
+	/*else if (theTrackForUpdating=="pixel"){ 
+		reco::Track pixelTrack = pixel_transform(globalTrack,track,allRecHitsTemp);
+		trackForUpdating = pixelTrack;
+	}*/ else {
+		std::cout << theTrackForUpdating << " not a valid track for updating at the vertex" << std::endl;
+		return std::make_pair(Trajectory(),Trajectory());
+	}
+		
+
 	// Update mu-only trajectory with vtx
 	FreeTrajectoryState updatedFTSatVtx = 
-		theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj.front(), globalTrack);
+		//theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj.front(), globalTrack);
+		//theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj.front(), innerTrack);
+		theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj.front(), trackForUpdating);
 	if (!updatedFTSatVtx.hasError()) return std::make_pair(Trajectory(),Trajectory());
+
+	std::vector<Trajectory> muonOnlyTraj_final;
+	FreeTrajectoryState updatedFTSatVtx_final;
+
+	// Do second refit and additional update with vtx
+	if (nIterations==0) {
+		muonOnlyTraj_final = muonOnlyTraj;
+		updatedFTSatVtx_final = updatedFTSatVtx;
+
+	} else {
+		int iter=0;
+		while (iter < nIterations) {
+			iter++;
+			FreeTrajectoryState updatedFTSatVtx_prev;
+			if (iter==1) updatedFTSatVtx_prev = updatedFTSatVtx;
+			else updatedFTSatVtx_prev = updatedFTSatVtx_final;
+			muonOnlyTraj_final = transform_again(updatedFTSatVtx_prev,muonRecHitsToRefit);
+
+			if (!muonOnlyTraj_final.size()) {
+				LogTrace(theCategory) << "No refitted Tracks... " << endl;
+				return std::make_pair(Trajectory(),Trajectory());
+			} else {
+				LogTrace(theCategory) << "Refitted pt: " 
+					<< muonOnlyTraj_final.front().firstMeasurement().updatedState().globalParameters().momentum().perp() << endl;
+			}
+
+			updatedFTSatVtx_final = 
+				theHighPTUtilities->updateMuonOnlyTraj(muonOnlyTraj_final.front(), globalTrack);
+
+			if (!updatedFTSatVtx_final.hasError()) return std::make_pair(Trajectory(),Trajectory());
+
+		}
+	}
+	//std::cout << globalTrack.qoverp() << " " << updatedFTSatVtx_final.parameters().signedInverseMomentum() << std::endl;
+
+
 	// Make trajectory
 	vector<Trajectory> muonOnlyVtxTraj = 
-		trajFromFTS(muonOnlyTraj.front(), updatedFTSatVtx, muonRecHitsToRefit);
+		trajFromFTS(muonOnlyTraj_final.front(), updatedFTSatVtx_final, muonRecHitsToRefit);
 
 	if (!muonOnlyVtxTraj.size()) {
 		return std::make_pair(Trajectory(), Trajectory());
 	}
 	else {
-		if (!muonOnlyVtxTraj.front().isValid() or !muonOnlyTraj.front().isValid()) {
+		if (!muonOnlyVtxTraj.front().isValid() or !muonOnlyTraj_final.front().isValid()) {
 			return std::make_pair(Trajectory(), Trajectory());
 		}
 		else {
@@ -273,7 +360,7 @@ HighPTMuonRefitter::refit(
 			//std::cout << muonOnlyVtxTraj.front().chiSquared() << std::endl;
 			//std::cout << std::endl;
 			//printTrajectories(muonOnlyVtxTraj.front(),false);
-			return std::make_pair(muonOnlyTraj.front(), muonOnlyVtxTraj.front());
+			return std::make_pair(muonOnlyTraj_final.front(), muonOnlyVtxTraj.front());
 		}
 	}
 
@@ -355,6 +442,35 @@ HighPTMuonRefitter::applyMuonHitsOption(
 		return muonRecHitsForRefit;
 		//
 	}
+	/*
+	else if (muonHitsOption=="pickypp") {
+		vector <Trajectory> globalTraj = transform(globalTrack, track, allRecHits);
+		ConstRecHitContainer muonRecHits = removeTrackerHits(allRecHits);
+		ConstRecHitContainer tmpMuonRecHits = applyHitMask(muonRecHits,nHits,hitPattern);
+		checkMuonHits(globalTrack, tmpMuonRecHits, hitMap); // globalTrack is not used
+		ConstRecHitContainer muonRecHitsForRefit = selectMuonHits(globalTraj.front(),hitMap);
+		return muonRecHitsForRefit;
+	}
+	else if (muonHitsOption=="dytpp") {
+		vector <Trajectory> globalTraj = transform(globalTrack, track, allRecHits);
+		//
+		// DYT 2.0 
+		//
+		ConstRecHitContainer DYTRecHits;
+		DynamicTruncation dytRefit(*theEvent,*theService);
+		dytRefit.setProd(all4DSegments, CSCSegments);
+		dytRefit.setSelector(theDYTselector);
+		dytRefit.setThr(theDYTthrs);
+		dytRefit.setUpdateState(theDYTupdator);
+		dytRefit.setUseAPE(theDYTuseAPE);
+		DYTRecHits = dytRefit.filter(globalTraj.front());
+		dytInfo->CopyFrom(dytRefit.getDYTInfo());
+		if ((DYTRecHits.size() > 1) && 
+				(DYTRecHits.front()->globalPosition().mag() > DYTRecHits.back()->globalPosition().mag()))
+			stable_sort(DYTRecHits.begin(),DYTRecHits.end(),RecHitLessByDet(alongMomentum));
+		ConstRecHitContainer muonDYTHits = removeTrackerHits(
+	}
+	*/
 	else {
 		// not a valid muonHitsOption
 		return muonRecHitsForRefit;
@@ -446,7 +562,27 @@ HighPTMuonRefitter::ConstRecHitContainer HighPTMuonRefitter::removeMuonHits(cons
     if (id.det() == DetId::Muon) {
 			continue;
     }
+		else if (id.det() == DetId::Tracker){
     results.push_back(*it);
+		}
+		else {
+			std::cout << "what the fuck" << std::endl;
+			if ( !(*it)->isValid() ) {
+				LogTrace(theCategory) << "invalid RecHit";
+				continue; 
+			}
+			
+			const GlobalPoint& pos = (*it)->globalPosition();
+			
+			std::cout
+				<< "r = " << sqrt(pos.x() * pos.x() + pos.y() * pos.y())
+				<< "  z = " << pos.z()
+				<< "  dimension = " << (*it)->dimension()
+				<< "  det = " << (*it)->det()->geographicalId().det()
+				<< "  subdet = " << (*it)->det()->subDetector()
+				<< "  raw id = " << (*it)->det()->geographicalId().rawId() 
+				<< std::endl;
+		}
   }
   return results;
 }
@@ -998,6 +1134,7 @@ vector<Trajectory> HighPTMuonRefitter::transform(const reco::Track& newTrack,
 
 	TrajectorySeed seed(garbage1,garbage2,propDir);
 
+	// Place the firstTSOS on the detector surface of the first RecHit for refit
 	if(recHitsForReFit.front()->geographicalId() != DetId(innerId)){
 		LogDebug(theCategory)<<"Propagation occured"<<endl;
 		if (printStuff) std::cout<<"Propagation occured"<<std::endl;
@@ -1046,6 +1183,155 @@ vector<Trajectory> HighPTMuonRefitter::transform(const reco::Track& newTrack,
 
 	return trajectories;
 }
+
+vector<Trajectory>
+HighPTMuonRefitter::transform_again(
+		const FreeTrajectoryState& updatedFTSatVtx,
+		const TransientTrackingRecHit::ConstRecHitContainer& urecHitsForReFit) const {
+	
+	TransientTrackingRecHit::ConstRecHitContainer recHitsForReFit = urecHitsForReFit;
+	// Check the order of the rechits
+	RefitDirection recHitsOrder;
+	if (recHitsForReFit.size()==1) recHitsOrder = theRefitDirection;
+	else recHitsOrder = checkRecHitsOrdering(recHitsForReFit);
+
+	LogTrace(theCategory) << "checkRecHitsOrdering() returned " << recHitsOrder
+		<< ", theRefitDirection is " << theRefitDirection
+		<< " (insideOut == " << insideOut << ", outsideIn == " << outsideIn << ")";
+
+	// Reverse the order in the case of inconsistency between the fit direction and the rechit order
+	if(theRefitDirection != recHitsOrder) reverse(recHitsForReFit.begin(),recHitsForReFit.end());
+	//
+	TrajectoryStateOnSurface firstTSOS = 
+		theService->propagator(thePropagatorName)->propagate(updatedFTSatVtx, recHitsForReFit.front()->det()->surface());
+	if(!firstTSOS.isValid()){
+		LogDebug(theCategory)<<"Propagation error!"<<endl;
+		if (printStuff) std::cout<<"Propagation error!"<<std::endl;
+		return vector<Trajectory>();
+	}
+
+	PTrajectoryStateOnDet garbage1;
+	edm::OwnVector<TrackingRecHit> garbage2;
+	PropagationDirection propDir;
+
+	// These lines cause the code to ignore completely what was set
+	// above, and force propDir for tracks from collisions!
+	if(propDir == alongMomentum && theRefitDirection == outsideIn)  propDir=oppositeToMomentum;
+	if(propDir == oppositeToMomentum && theRefitDirection == insideOut) propDir=alongMomentum;
+
+	// For now, don't put any special propagation direction logic for cosmic muons
+	// TrackingTools/TrackRefitters/src/TrackTransformer.cc has correct logic to handle this
+
+	TrajectorySeed seed(garbage1,garbage2,propDir);
+
+	firstTSOS.rescaleError(theRescaleErrorFactor);
+	vector<Trajectory> trajectories = theFitter->fit(seed,recHitsForReFit,firstTSOS);
+
+	if(trajectories.empty()){
+		LogDebug(theCategory) << "No Track refitted!" << endl;
+		if (printStuff) std::cout << "No Track refitted!" << std::endl;
+		return vector<Trajectory>();
+	}
+
+	return trajectories;
+
+}
+
+//
+// Refit global transient track with only pixel hits
+//
+reco::Track 
+HighPTMuonRefitter::pixel_transform(
+		const reco::Track& glbTrack,
+		const reco::TransientTrack track,
+		const TransientTrackingRecHit::ConstRecHitContainer& allRecHits) const {
+  //
+	ConstRecHitContainer pixelRecHits;
+	for (auto recHit : allRecHits) {
+		// Keep if Pixel Detector hit
+    DetId id = (*recHit).geographicalId();
+		if (id.det() == DetId::Tracker) {
+			if ( id.subdetId() == PXB || id.subdetId() == PXF ) {
+				pixelRecHits.push_back(recHit);
+			} // keep if pixel hit
+		} // if hit is tracker
+		// Discard everything else
+		else continue;
+	} // for loop over hits
+
+	if(pixelRecHits.size() < 1) return reco::Track();
+
+	// Force the order of refit to be inside-out
+	// Check the order of the rechits
+	RefitDirection recHitsOrder;
+	if (pixelRecHits.size()==1) recHitsOrder = insideOut;
+	else recHitsOrder = checkRecHitsOrdering(pixelRecHits);
+
+	LogTrace(theCategory) << "checkRecHitsOrdering() returned " << recHitsOrder
+		<< ", theRefitDirection is " << theRefitDirection
+		<< " (insideOut == " << insideOut << ", outsideIn == " << outsideIn << ")";
+
+	// Reverse the order in the case of inconsistency between the fit direction and the rechit order
+	if(insideOut != recHitsOrder) reverse(pixelRecHits.begin(),pixelRecHits.end());
+		
+	TrajectoryStateOnSurface firstTSOS = track.innermostMeasurementState();
+
+	if(!firstTSOS.isValid()){
+		LogWarning(theCategory) << "Error wrong initial state!" << endl;
+		if (printStuff) std::cout << "Error wrong initial state!" << std::endl;
+		return reco::Track();
+	}
+  
+
+	// This is the only way to get a TrajectorySeed with settable propagation direction
+	PTrajectoryStateOnDet garbage1;
+	edm::OwnVector<TrackingRecHit> garbage2;
+	PropagationDirection propDir = alongMomentum;
+
+	// For now, don't put any special propagation direction logic for cosmic muons
+	// TrackingTools/TrackRefitters/src/TrackTransformer.cc has correct logic to handle this
+
+	TrajectorySeed seed(garbage1,garbage2,propDir);
+
+	// Place the firstTSOS on the detector surface of the first RecHit for refit
+	unsigned int innerId = glbTrack.innerDetId();
+	if(pixelRecHits.front()->geographicalId() != DetId(innerId)){
+		LogDebug(theCategory)<<"Propagation occured"<<endl;
+		if (printStuff) std::cout<<"Propagation occured"<<std::endl;
+
+		LogTrace(theCategory) << "propagating firstTSOS at " << firstTSOS.globalPosition()
+			  << " to first rechit with surface pos " 
+			  << pixelRecHits.front()->det()->surface().toGlobal(LocalPoint(0,0,0));
+		if (printStuff) {
+			std::cout << "propagating firstTSOS at " << firstTSOS.globalPosition()
+					  << " to first rechit with surface pos " 
+					  << pixelRecHits.front()->det()->surface().toGlobal(LocalPoint(0,0,0)) 
+					  << std::endl;
+		}
+
+		firstTSOS = theService->propagator(thePropagatorName)->propagate(firstTSOS, pixelRecHits.front()->det()->surface());
+		if(!firstTSOS.isValid()){
+			LogDebug(theCategory)<<"Propagation error!"<<endl;
+			if (printStuff) std::cout<<"Propagation error!"<<std::endl;
+			return reco::Track();
+		}
+	}
+
+	firstTSOS.rescaleError(theRescaleErrorFactor);
+       
+	if(!firstTSOS.isValid()){ std::cout << "first TSOS is not valid?" << std::endl;}
+
+	vector<Trajectory> trajectories = theFitter->fit(seed,pixelRecHits,firstTSOS);
+
+	if(trajectories.empty()){
+		LogDebug(theCategory) << "No Track refitted!" << endl;
+		return reco::Track();
+	}
+
+	return theHighPTUtilities->buildTrackFromTrajAtPCA(trajectories.front()).second;
+	//return trajectories;
+}
+
 
 //
 // Build trajectory from FTS at vertex and rechits used in refit
@@ -1113,7 +1399,7 @@ HighPTMuonRefitter::trajFromFTS(
 				//std::cout << "HighPTMuonRefitter trajFromFTS thisEstimate.first is false" << std::endl;
 				return std::vector<Trajectory>();
 			}
-
+			// this is needed for the layer() argument in TrajectoryMeasurement
 			TrajectoryMeasurement thisMuonOnlyTM;
 			for (auto tmpMuonOnlyTM : muonOnlyTraj.measurements()) {
 				if (tmpMuonOnlyTM.recHit()->rawId()==hit.rawId()) {
@@ -1228,7 +1514,7 @@ void HighPTMuonRefitter::printHitscout(const ConstRecHitContainer& hits) const {
   for (ConstRecHitContainer::const_iterator ir = hits.begin(); ir != hits.end(); ir++ ) {
 	  auto hit = (*ir);
 	  printRecHit(hit);
-  std::cout << "\n------------------------------------------------\n" << std::endl;
+		std::cout << "\n------------------------------------------------\n" << std::endl;
   }
   std::cout << "\n================================================\n" << std::endl;
 

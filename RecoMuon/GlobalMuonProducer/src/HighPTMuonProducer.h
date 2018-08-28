@@ -64,6 +64,8 @@ class HighPTMuonProducer : public edm::stream::EDProducer<> {
 	edm::EDGetTokenT<reco::TrackCollection> glbMuonsToken;
 	edm::EDGetTokenT< std::vector<reco::Muon> > recoMuonsToken;
 	edm::EDGetTokenT< std::vector<reco::GenParticle> > genParticlesToken;
+	edm::InputTag theBeamSpotInputTag;
+	edm::EDGetTokenT< reco::BeamSpot > theBeamSpotToken;
 	double dRcut;
 	edm::EDGetTokenT<std::vector<Trajectory> > glbMuonsTrajToken;
 
@@ -77,6 +79,8 @@ class HighPTMuonProducer : public edm::stream::EDProducer<> {
 
 	std::string theAlias;
 	std::vector<std::string> theRefits;
+	std::string theSelectorName;
+	std::string BaseTrackType;
 
 	void setAlias( std::string alias ){
 		alias.erase( alias.size() - 1, alias.size() );

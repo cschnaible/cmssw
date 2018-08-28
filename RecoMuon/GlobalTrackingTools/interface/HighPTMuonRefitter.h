@@ -85,6 +85,7 @@ class HighPTMuonRefitter {
     /// build combined trajectory from subset muon RecHits
     std::pair<Trajectory,Trajectory> refit(
 					const reco::Track& globalTrack,
+					const reco::Track& innerTrack,
 				  const std::string& theMuonHitsOption,
 				  const TrackerTopology *tTopo,
 					const int &nHits,
@@ -95,6 +96,16 @@ class HighPTMuonRefitter {
 					const reco::Track& newTrack,
 					const reco::TransientTrack track,
 					const TransientTrackingRecHit::ConstRecHitContainer& recHitsForReFit) const;
+		/// do additional of refit of the track
+		std::vector<Trajectory> transform_again(
+				const FreeTrajectoryState& updatedFTSatVtx,
+				const TransientTrackingRecHit::ConstRecHitContainer& recHitsToRefit) const;
+		// do refit with only pixel hits
+		reco::Track pixel_transform(
+					const reco::Track& newTrack,
+					const reco::TransientTrack track,
+					const TransientTrackingRecHit::ConstRecHitContainer& recHitsForReFit) const;
+
     
     // return DYT-related informations           
     const reco::DYTInfo* getDYTInfo() {return dytInfo;}
@@ -207,8 +218,10 @@ class HighPTMuonRefitter {
 
     bool theRPCInTheFit;
 		bool printStuff;
+		int nIterations;
 		unsigned int minNumHits;
     double theRescaleErrorFactor;
+		std::string theTrackForUpdating;
 
     std::vector<int> theDYTthrs;
     int theDYTselector;

@@ -26,6 +26,9 @@
 #include "DataFormats/Common/interface/AssociationMap.h"
 #include "DataFormats/Common/interface/OneToValue.h"
 #include "DataFormats/Math/interface/AlgebraicROOTObjects.h"
+#include "DataFormats/Candidate/interface/Candidate.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticle.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticleFwd.h"
 
 #include "RecoMuon/TrackingTools/interface/MuonServiceProxy.h"
 
@@ -39,6 +42,11 @@ class MuonUpdatorAtVertex;
 
 class HighPTMuonUtilities { 
 	public:
+	typedef ROOT::Math::SMatrix< double,10,10,ROOT::Math::MatRepSym<double,  10> > Matrix1010;
+	typedef ROOT::Math::SMatrix< double,10, 5,ROOT::Math::MatRepStd<double,10,5> > Matrix105;
+	typedef ROOT::Math::SMatrix< double, 5,10,ROOT::Math::MatRepStd<double,5,10> > Matrix510;
+	typedef ROOT::Math::SMatrix< double, 5, 5,ROOT::Math::MatRepStd<double,5, 5> > Matrix55;
+	typedef ROOT::Math::SVector< double,10> Vector10;
 
     /// constructor with Parameter Set and MuonServiceProxy
     HighPTMuonUtilities(const edm::ParameterSet&, const MuonServiceProxy*, edm::ConsumesCollector&);
@@ -55,8 +63,17 @@ class HighPTMuonUtilities {
 
 		std::pair<Trajectory,Trajectory> select(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Muon& glbTrack) const;
+			const reco::Muon& glbTrack,
+			const reco::GenParticle& genMuon) const;
 			//const reco::Track& glbTrack) const;
+
+		reco::TrackExtra buildTrackExtra(const Trajectory& trajectory) const;
+		std::pair<bool,reco::Track> buildTrackFromTrajAtPCA(
+				const Trajectory&) const;
+		std::pair<bool,reco::Track> buildTrackFromTrajAtPCA(
+				const Trajectory&, const reco::BeamSpot&, const bool& vtxUpdate) const;
+		std::pair<bool,reco::Track> buildTrackFromTrackAtPCA(
+				const reco::Track&, const reco::BeamSpot&) const;
 
 	private:
 
@@ -73,9 +90,7 @@ class HighPTMuonUtilities {
 		edm::InputTag theBeamSpotInputTag;
 		edm::Handle<reco::BeamSpot> beamSpot;
 
-		std::pair<bool,reco::Track> buildTrackFromTrajAtPCA(const Trajectory&, const reco::BeamSpot&) const;
-
-		std::pair<bool,reco::Track> buildTrackFromTrackAtPCA(const reco::Track&, const reco::BeamSpot&) const;
+		int calculateNDoF(const Trajectory& traj, const bool& bon, const bool& vtxUpdate) const;
 
 		FreeTrajectoryState buildFTSfromParCov(
 				const std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError>& refitUpdateParCov,
@@ -96,16 +111,31 @@ class HighPTMuonUtilities {
 
 		std::pair<Trajectory,Trajectory> selectBasedOnCurvPull(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-			const reco::Muon& glbTrack) const;
+			const reco::Muon& glbTrack,
+			const std::string& refTrack) const;
 			//const reco::Track& glbTrack) const;
 
-		std::pair<Trajectory,Trajectory> selectBasedOnTEST(
+		std::pair<Trajectory,Trajectory> selectBasedOnRelCurvErr(
 			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
 			const reco::Muon& glbTrack) const;
+
+		std::pair<Trajectory,Trajectory> selectBasedOnGEN(
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Muon& glbTrack,
+			const reco::GenParticle& genMuon) const;
+		std::pair<Trajectory,Trajectory> selectBasedOnTEST(
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Muon& glbTrack,
+			const reco::GenParticle& genMuon) const;
+			//const reco::Track& glbTrack) const;
+		std::pair<Trajectory,Trajectory> selectBasedOnTEST_2(
+			const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+			const reco::Muon& glbTrack,
+			const reco::GenParticle& genMuon) const;
 			//const reco::Track& glbTrack) const;
 
-    //std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError> combine(
 		void combine(const reco::Track &tracker, const reco::Track &refit) const;
+		std::pair<double,double> combineRet(const reco::Track &tracker, const reco::Track &refit) const;
 
 
 		void printTSOS(const TrajectoryStateOnSurface& thisTSOS) const;

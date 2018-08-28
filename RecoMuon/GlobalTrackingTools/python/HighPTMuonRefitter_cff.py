@@ -37,7 +37,9 @@ HighPTMuonRefitter = cms.PSet(
 
 
 		printStuff = cms.bool( False ),
+		nIterations = cms.int32( 0 ), # default is to do no additional iterations
 		minNumHits = cms.int32(1),
+		trackForUpdating = cms.string('global'),
 
 )
 

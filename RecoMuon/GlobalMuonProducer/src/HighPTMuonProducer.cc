@@ -64,8 +64,12 @@ HighPTMuonProducer::HighPTMuonProducer(const ParameterSet& parameterSet) {
   edm::ConsumesCollector iC  = consumesCollector();  
 
 	// Utilities parameters
-  ParameterSet updatorParameters = parameterSet.getParameter<ParameterSet>("UtilitiesParameters");
-	theHighPTUtilities = new HighPTMuonUtilities(updatorParameters, theService, iC);
+  ParameterSet utilitiesParameters = parameterSet.getParameter<ParameterSet>("UtilitiesParameters");
+	theHighPTUtilities = new HighPTMuonUtilities(utilitiesParameters, theService, iC);
+	theSelectorName = utilitiesParameters.getParameter<std::string>("Selector");
+
+	theBeamSpotInputTag = parameterSet.getParameter<edm::InputTag>("beamSpot");
+	theBeamSpotToken = consumes<reco::BeamSpot>(theBeamSpotInputTag);
 
   // TrackRefitter parameters
   ParameterSet refitterParameters = parameterSet.getParameter<ParameterSet>("RefitterParameters");
@@ -76,6 +80,8 @@ HighPTMuonProducer::HighPTMuonProducer(const ParameterSet& parameterSet) {
   theTrackLoader = new MuonTrackLoader(trackLoaderParameters,iC,theService);
 
   theRefits = parameterSet.getParameter< std::vector<std::string> >("Refits");
+
+	BaseTrackType = parameterSet.getParameter<std::string>("BaseTrackType");
 
   for(unsigned int ww=0;ww<theRefits.size();ww++){
     LogDebug("Muon|RecoMuon|HighPTMuonProducer") << "Refit " << theRefits[ww];
@@ -147,6 +153,10 @@ void HighPTMuonProducer::produce(Event& event, const EventSetup& eventSetup) {
 	Handle< std::vector<reco::GenParticle> > genParticlesHandle;
 	event.getByToken(genParticlesToken,genParticlesHandle);
 
+	// Get the beam spot
+	edm::Handle<reco::BeamSpot> beamSpot;
+  event.getByToken(theBeamSpotToken, beamSpot);
+
   auto dytInfo = std::make_unique<DYTestimators>();
   DYTestimators::Filler filler(*dytInfo);
   size_t GLBmuonSize = glbMuons->size();
@@ -176,119 +186,143 @@ void HighPTMuonProducer::produce(Event& event, const EventSetup& eventSetup) {
     //reco::TrackRef::key_type trackIndex = 0;
 		reco::MuonRef::key_type muonIndex = 0;
     int glbCounter = 0;
-
-    //for (reco::TrackCollection::const_iterator track = glbTracks->begin(); track!=glbTracks->end(); track++ , ++trackIndex) 
-    //for (const auto &muon : *recoMuons) 
-		//
-		for (reco::GenParticleCollection::const_iterator gen = genParticles->begin(); gen!=genParticles->end(); gen++) {
-			if (abs((*gen).pdgId())!=13) continue;
 			
-			for (reco::MuonCollection::const_iterator muon = recoMuons->begin(); muon!=recoMuons->end(); muon++, ++muonIndex) {
+		for (reco::MuonCollection::const_iterator muon = recoMuons->begin(); muon!=recoMuons->end(); muon++, ++muonIndex) {
 
-				if (deltaR((*gen),(*muon))>dRcut) continue;
-
-				if (!(*muon).isGlobalMuon()) continue;
-				const reco::TrackRef track = (*muon).combinedMuon();
-
-				std::cout << "\n**********\n" << std::endl;
-				std::cout << event.id().run() << ":" << event.eventAuxiliary().luminosityBlock() << ":" << event.id().event() << std::endl;
-				std::cout << "Gen  K = " << (*gen).charge()/(*gen).p() 
-					<< " pT = " << (*gen).pt()
-					<< " eta = " << (*gen).eta() 
-					<< " phi = " << (*gen).phi()
-					<< "\n" << std::endl;
-
-				vector< pair<Trajectory, Trajectory> > thisGlobalCombRefits; 
-
-				//reco::TrackRef glbRef(glbMuons,trackIndex);
-				reco::TrackRef glbRef(glbMuons,track.key());
-				//reco::MuonRef muonRef(recoMuons,muonIndex);
-				//std::cout << (*muonRef).pt() << std::endl;
-
-				
-				// Refit this global muon according to the refit type
-				if (theRefits[ww]=="combinatoric") {
-					thisGlobalCombRefits.clear();
-					// Count muon hits (don't count RPC)
-					int nHits = 0;
-					for (trackingRecHit_iterator hit = (*track).recHitsBegin(); hit != (*track).recHitsEnd(); ++hit) {
-						if (!(*hit)->isValid()) continue;
-						if ((*hit)->geographicalId().det() == DetId::Tracker) continue; // skip tracker
-						else if ((*hit)->geographicalId().det() == DetId::Muon) { // double check it's a muon hit
-							if ((*hit)->geographicalId().subdetId() == 3) continue; // skip RPC
-							nHits++;
-						}
-					}
-					int nComb = pow(2,nHits)-1;
-					for (int hp = 1; hp <= nComb; hp++) {
-						pair<Trajectory, Trajectory> refits = theRefitter->refit(*track, theRefits[ww], tTopo, nHits, hp);
-						thisGlobalCombRefits.push_back(refits);
-						//if (refits.first.isValid()==false || refits.second.isValid()==false) continue;
-						//if (refits.first.empty()==true || refits.second.empty()==true) continue;
-					}
-					//
-					// Choose the best solution out of all muon hit combinatorics
-					//
-					if (thisGlobalCombRefits.empty()) continue;
-					std::pair<Trajectory,Trajectory> bestPair;
-					//if (thisGlobalCombRefits.size()==1) bestPair = thisGlobalCombRefits.front();
-					//else
-					bestPair = theHighPTUtilities->select(thisGlobalCombRefits, *muon);
-					if (bestPair.first.empty() || bestPair.second.empty()) continue;
-					continue;
-					
-					Trajectory *refit = new Trajectory(bestPair.first);
-					trajectories.push_back(refit);
-					std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
-					miniMap.push_back(thisPair);
-
-					Trajectory *refitUpdate = new Trajectory(bestPair.second);
-					trajectoriesUpdate.push_back(refitUpdate);
-					std::pair<Trajectory*,reco::TrackRef> thisUpdatePair(refitUpdate,glbRef);
-					miniMapUpdate.push_back(thisUpdatePair);
-				} 
-				else if (theRefits[ww]=="tracker") {
-					pair<Trajectory, Trajectory> refits =theRefitter->refit(*track,theRefits[ww],tTopo,-1,-1);
-					if (refits.first.isValid()==false) continue;
-					if (refits.first.empty()==true) continue;
-
-					Trajectory *refit = new Trajectory(refits.first);
-					trajectories.push_back(refit);
-					std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
-					miniMap.push_back(thisPair);
-				}
-				else {
-					pair<Trajectory, Trajectory> refits =theRefitter->refit(*track,theRefits[ww],tTopo,-1,-1);
-					if (refits.first.isValid()==false || refits.second.isValid()==false) continue;
-					if (refits.first.empty()==true || refits.second.empty()==true) continue;
-
-					Trajectory *refit = new Trajectory(refits.first);
-					trajectories.push_back(refit);
-					std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
-					miniMap.push_back(thisPair);
-
-					Trajectory *refitUpdate = new Trajectory(refits.second);
-					trajectoriesUpdate.push_back(refitUpdate);
-					std::pair<Trajectory*,reco::TrackRef> thisUpdatePair(refitUpdate,glbRef);
-					miniMapUpdate.push_back(thisUpdatePair);
-				}
-
-				if (theRefits[ww] == "dyt") dytTmp[glbCounter] = *theRefitter->getDYTInfo();
-				glbCounter++;
-
-			} // end loop on reco muons
-
-			// Load muon-only no update tracks
-			theTrackLoader->loadTracks(trajectories,event,miniMap,glbMuons, *tTopo, theRefits[ww],false);
-			// Load muon-only with update tracks
-			if (theRefits[ww]!="tracker") {
-				theTrackLoader->loadTracks(trajectoriesUpdate,event,miniMapUpdate,glbMuons, *tTopo, theRefits[ww]+"VtxUpdate",false);
+			if (!(*muon).isGlobalMuon()) continue;
+			const reco::TrackRef glbTrack = (*muon).combinedMuon();
+			const reco::TrackRef pickyTrack = (*muon).pickyTrack();
+			const reco::TrackRef dytTrack = (*muon).dytTrack();
+			const reco::TrackRef tpfmsTrack = (*muon).tpfmsTrack();
+			const reco::TrackRef tunePTrack = (*muon).muonBestTrack();
+			const reco::TrackRef innerTrack = (*muon).innerTrack();
+			reco::TrackRef track;
+			if (BaseTrackType == "global")
+				track = glbTrack;
+			else if (BaseTrackType == "picky")
+				track = pickyTrack;
+			else if (BaseTrackType == "dyt")
+				track = dytTrack;
+			else if (BaseTrackType == "tpfms")
+				track = tpfmsTrack;
+			else if (BaseTrackType == "tuneP")
+				track = tunePTrack;
+			else {
+				std::cout << BaseTrackType << " not a valid track type!" << std::endl;
+				continue;
 			}
 
-			trajectories.clear();
-			trajectoriesUpdate.clear();
+			reco::GenParticle genMuon;
+			if (theSelectorName=="TEST" || theSelectorName=="GEN") {
+				for (reco::GenParticleCollection::const_iterator gen = genParticles->begin(); gen!=genParticles->end(); gen++) {
+					if (fabs((*gen).pdgId())!=13) continue;
+					if (deltaR((*gen),(*muon))>dRcut) continue;
+					genMuon = *gen;
+				}
+				//std::cout << "\n**********\n" << std::endl;
+				//std::cout << event.id().run() << ":" << event.eventAuxiliary().luminosityBlock() << ":" << event.id().event() << std::endl;
+			}
 
-		} // end loop gen muons
+
+			vector< pair<Trajectory, Trajectory> > thisGlobalCombRefits; 
+
+			//reco::TrackRef glbRef(glbMuons,trackIndex);
+			reco::TrackRef glbRef(glbMuons,glbTrack.key());
+			//reco::MuonRef muonRef(recoMuons,muonIndex);
+			//std::cout << (*muonRef).pt() << std::endl;
+
+			
+			// Refit this global muon according to the refit type
+			if (theRefits[ww]=="combinatoric") {
+				thisGlobalCombRefits.clear();
+				// Count muon hits (don't count RPC)
+				int nHits = 0;
+				for (trackingRecHit_iterator hit = (*track).recHitsBegin(); hit != (*track).recHitsEnd(); ++hit) {
+					if (!(*hit)->isValid()) continue;
+					if ((*hit)->geographicalId().det() == DetId::Tracker) continue; // skip tracker
+					else if ((*hit)->geographicalId().det() == DetId::Muon) { // double check it's a muon hit
+						if ((*hit)->geographicalId().subdetId() == 3) continue; // skip RPC
+						nHits++;
+					}
+				}
+				if (nHits<1) continue;
+				int nComb = pow(2,nHits)-1;
+				for (int hp = 1; hp <= nComb; hp++) {
+					//pair<Trajectory, Trajectory> refits = theRefitter->refit(*track, theRefits[ww], tTopo, nHits, hp);
+					pair<Trajectory, Trajectory> refits = theRefitter->refit(*track, *innerTrack, theRefits[ww], tTopo, nHits, hp);
+					if (theSelectorName!="TEST") {
+						if (refits.first.isValid()==false || refits.second.isValid()==false) continue;
+						if (refits.first.empty()==true || refits.second.empty()==true) continue;
+					}
+					thisGlobalCombRefits.push_back(refits);
+				}
+				//
+				// Choose the best solution out of all muon hit combinatorics
+				//
+				if (thisGlobalCombRefits.empty()) continue;
+				std::pair<Trajectory,Trajectory> bestPair;
+				if (theSelectorName=="TEST") {
+					bestPair = theHighPTUtilities->select(thisGlobalCombRefits, *muon, genMuon);
+				}
+				else {
+					if (thisGlobalCombRefits.size()==1) bestPair = thisGlobalCombRefits.front();
+					else bestPair = theHighPTUtilities->select(thisGlobalCombRefits, *muon, genMuon);
+				}
+				if (bestPair.first.empty() || bestPair.second.empty()) continue;
+				
+				Trajectory *refit = new Trajectory(bestPair.first);
+				trajectories.push_back(refit);
+				std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
+				miniMap.push_back(thisPair);
+
+				Trajectory *refitUpdate = new Trajectory(bestPair.second);
+				trajectoriesUpdate.push_back(refitUpdate);
+				std::pair<Trajectory*,reco::TrackRef> thisUpdatePair(refitUpdate,glbRef);
+				miniMapUpdate.push_back(thisUpdatePair);
+			} 
+			else if (theRefits[ww]=="tracker") {
+				pair<Trajectory, Trajectory> refits =theRefitter->refit(*track,*innerTrack,theRefits[ww],tTopo,-1,-1);
+				if (refits.first.isValid()==false) continue;
+				if (refits.first.empty()==true) continue;
+
+				Trajectory *refit = new Trajectory(refits.first);
+				trajectories.push_back(refit);
+				std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
+				miniMap.push_back(thisPair);
+			}
+			else {
+				pair<Trajectory, Trajectory> refits =theRefitter->refit(*track,*innerTrack,theRefits[ww],tTopo,-1,-1);
+				if (refits.first.isValid()==false || refits.second.isValid()==false) continue;
+				if (refits.first.empty()==true || refits.second.empty()==true) continue;
+
+				Trajectory *refit = new Trajectory(refits.first);
+				trajectories.push_back(refit);
+				std::pair<Trajectory*,reco::TrackRef> thisPair(refit,glbRef);
+				miniMap.push_back(thisPair);
+
+				Trajectory *refitUpdate = new Trajectory(refits.second);
+				trajectoriesUpdate.push_back(refitUpdate);
+				std::pair<Trajectory*,reco::TrackRef> thisUpdatePair(refitUpdate,glbRef);
+				miniMapUpdate.push_back(thisUpdatePair);
+			}
+
+			if (theRefits[ww] == "dyt") dytTmp[glbCounter] = *theRefitter->getDYTInfo();
+			glbCounter++;
+
+		} // end loop on reco muons
+
+		// Load muon-only no update tracks
+		bool doSmoothing = false;
+		if (theRefits[ww]=="tracker") doSmoothing=true;
+		theTrackLoader->loadTracks(trajectories,event,miniMap,glbMuons, *tTopo, theRefits[ww],doSmoothing);
+		// Load muon-only with update tracks
+		if (theRefits[ww]!="tracker") {
+			theTrackLoader->loadTracks(trajectoriesUpdate,event,miniMapUpdate,glbMuons, *tTopo, theRefits[ww]+"VtxUpdate",false);
+		}
+		//std::cout << " ---- " << std::endl;
+
+		trajectories.clear();
+		trajectoriesUpdate.clear();
 
   } // end loop on refits
 

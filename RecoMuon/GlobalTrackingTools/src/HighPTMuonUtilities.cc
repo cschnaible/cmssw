@@ -26,6 +26,9 @@
 #include "DataFormats/DetId/interface/DetId.h"
 #include "DataFormats/MuonDetId/interface/DTChamberId.h"
 #include "DataFormats/MuonDetId/interface/CSCDetId.h"
+#include "DataFormats/Candidate/interface/Candidate.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticle.h"
+#include "DataFormats/HepMCCandidate/interface/GenParticleFwd.h"
 
 //
 // Constructor
@@ -43,6 +46,13 @@ HighPTMuonUtilities::HighPTMuonUtilities(const edm::ParameterSet& par,
 	factor = par.getParameter<double>("trackRankFactor");
 	curvPullCut = par.getParameter<double>("curvPullCut");
 	theBeamSpotToken = iC.consumes<reco::BeamSpot>(theBeamSpotInputTag);
+	typedef	ROOT::Math::SMatrix<double,4,5,ROOT::Math::MatRepStd<double,4,5>> Matrix45;
+	typedef	ROOT::Math::SMatrix<double,4,4,ROOT::Math::MatRepStd<double,4,4>> Matrix44;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepStd<double,5,5>> Matrix55;
+	typedef	ROOT::Math::SMatrix<double,5,4,ROOT::Math::MatRepStd<double,5,4>> Matrix54;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepSym<double,5>> SymMatrix55;
+	typedef	ROOT::Math::SVector<double,4> Vector4;
+	typedef	ROOT::Math::SVector<double,5> Vector5;
 }
 
 //
@@ -70,7 +80,7 @@ HighPTMuonUtilities::updateMuonOnlyTraj(
 	
 	//std::cout << "\nHighPTMuonUtilities updateMuonOnlyTraj()\n" << std::endl;
 	std::pair<bool,reco::Track> refitTrackAtPCA = 
-		buildTrackFromTrajAtPCA(refitTraj, *beamSpot);
+		buildTrackFromTrajAtPCA(refitTraj, *beamSpot,false);
 	std::pair<bool,reco::Track> globalTrackAtPCA = 
 		buildTrackFromTrackAtPCA(globalTrack, *beamSpot);
 
@@ -102,7 +112,15 @@ HighPTMuonUtilities::updateMuonOnlyTraj(
 //
 std::pair<bool,reco::Track>
 HighPTMuonUtilities::buildTrackFromTrajAtPCA(
-		const Trajectory& trajectory, const reco::BeamSpot &beamSpot) const {
+		const Trajectory& trajectory) const {
+	// Overload this function to add in beamSpot and vtxUpdate criteron
+	// If called from HighPTMuonRefitter these classes aren't defined
+		return buildTrackFromTrajAtPCA(trajectory,*beamSpot,false);
+}
+
+std::pair<bool,reco::Track>
+HighPTMuonUtilities::buildTrackFromTrajAtPCA(
+		const Trajectory& trajectory, const reco::BeamSpot &beamSpot, const bool& vtxUpdate) const {
 
   const std::string metname = "Muon|RecoMuon|HighPTMuonUtilities";
 
@@ -155,7 +173,8 @@ HighPTMuonUtilities::buildTrackFromTrajAtPCA(
 
   bool bon = true;
   if(fabs(theService->magneticField()->inTesla(GlobalPoint(0,0,0)).z()) < 0.01) bon=false;   
-  double ndof = trajectory.ndof(bon);
+  //double ndof = trajectory.ndof(bon);
+	int ndof = calculateNDoF(trajectory,bon,vtxUpdate);
 	
 	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA fts q/p = " << ftsAtVtx.signedInverseMomentum() << std::endl;
 	//std::cout << "HighPTMuonUtilities buildTrackFromTrajAtPCA() position = " << ftsAtVtx.position() << std::endl;
@@ -471,7 +490,8 @@ HighPTMuonUtilities::KFupdateTrackWithVtx(
 std::pair<Trajectory,Trajectory>
 HighPTMuonUtilities::select(
 		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-		const reco::Muon& glbTrack) const
+		const reco::Muon& glbTrack, 
+		const reco::GenParticle& genMuon) const
 	//	const reco::Track& glbTrack) const
 {
 	std::pair<Trajectory,Trajectory> bestPair;
@@ -481,10 +501,20 @@ HighPTMuonUtilities::select(
 		bestPair = selectBasedOnDxyPull(refits, glbTrack);
 	else if (theSelectorName=="trackRank")
 		bestPair = selectBasedOnTrackRank(refits,glbTrack);
-	else if (theSelectorName=="curvPull")
-		bestPair = selectBasedOnCurvPull(refits,glbTrack);
+	else if (theSelectorName=="curvPullTrk")
+		bestPair = selectBasedOnCurvPull(refits,glbTrack,"tracker");
+	else if (theSelectorName=="curvPullTuneP")
+		bestPair = selectBasedOnCurvPull(refits,glbTrack,"tuneP");
+	else if (theSelectorName=="relCurvErr")
+		bestPair = selectBasedOnRelCurvErr(refits,glbTrack);
+	//else if (theSelectorName=="chiSqProb")
+	//	bestPair = selectBasedOnChiSqProb(refits);
 	else if (theSelectorName=="TEST")
-		bestPair = selectBasedOnTEST(refits,glbTrack);
+		bestPair = selectBasedOnTEST(refits,glbTrack,genMuon);
+	else if (theSelectorName=="TEST2")
+		bestPair = selectBasedOnTEST_2(refits,glbTrack,genMuon);
+	else if (theSelectorName=="GEN")
+		bestPair = selectBasedOnGEN(refits,glbTrack,genMuon);
 	else
 		std::cout << "Not a valid selector" << std::endl;
 	/*
@@ -494,92 +524,6 @@ HighPTMuonUtilities::select(
 		std::cout << "************************************" << std::endl;
 	}
 	*/
-	return bestPair;
-}
-std::pair<Trajectory,Trajectory>
-HighPTMuonUtilities::selectBasedOnTrackRank(
-		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-		const reco::Muon& glbTrack) const
-		//const reco::Track& glbTrack) const
-{
-	//std::cout << "\nChoosing trajectory based on max track rank" << std::endl;
-	//std::cout << "nHits * " << factor << " - chi^2\n" << std::endl;
-	int i(0);
-	double bestRank = -999.;
-	std::pair<Trajectory,Trajectory> bestPair;
-	double glbCurv = glbTrack.bestTrack()->qoverp();
-	for (auto refit : refits) {
-		Trajectory muOnlyTraj = refit.first;
-		Trajectory muOnlyUpdateTraj = refit.second;
-		// skip empty trajectories
-		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
-			i++;
-			continue;
-		}
-		else {
-			std::pair<bool,reco::Track> muOnlyTrack = 
-				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
-			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
-				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
-
-			if (!muOnlyTrack.first or !muOnlyUpdateTrack.first) continue;
-			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbCurv)/glbCurv);
-			if (thisCurvPull > curvPullCut) continue;
-			int nHits = muOnlyTraj.foundHits();
-			double thisRank = nHits*factor - muOnlyUpdateTraj.chiSquared();
-			//std::cout << "thisRank " << thisRank << std::endl;
-			if (thisRank > bestRank) {
-				bestRank = thisRank;
-				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
-			}
-			i++;
-		}
-	}
-	//std::cout << "bestRank " << bestRank << std::endl;
-	return bestPair;
-}
-
-//
-// Smallest |(k_ref - k_glb)/k_glb|
-//
-std::pair<Trajectory,Trajectory>
-HighPTMuonUtilities::selectBasedOnCurvPull(
-		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
-		const reco::Muon& glbTrack) const
-		//const reco::Track& glbTrack) const
-{
-	//std::cout << "\nChoosing trajectory based on smallest curvature pull" << std::endl;
-	int i(0);
-	double bestPull = 999.;
-	double curvReference = glbTrack.innerTrack()->qoverp();
-	std::pair<Trajectory,Trajectory> bestPair;
-	for (auto refit : refits) {
-		Trajectory muOnlyTraj = refit.first;
-		Trajectory muOnlyUpdateTraj = refit.second;
-		// skip empty trajectories
-		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
-			i++;
-			continue;
-		}
-		else if (muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
-			i++;
-			continue;
-		}
-		else {
-			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
-				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
-
-			if (!muOnlyUpdateTrack.first) continue;
-			double thisPull = fabs((muOnlyUpdateTrack.second.qoverp() - curvReference)/curvReference);
-			//std::cout << "thisPull " << thisPull << std::endl;
-			if (thisPull < bestPull) {
-				bestPull = thisPull;
-				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
-			}
-			i++;
-		}
-	}
-	//std::cout << "bestPull " << bestPull << std::endl;
 	return bestPair;
 }
 
@@ -611,9 +555,9 @@ HighPTMuonUtilities::selectBasedOnDxyPull(
 		}
 		else {
 			std::pair<bool,reco::Track> muOnlyTrack = 
-				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot,false);
 			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
-				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
 
 			if (!muOnlyTrack.first or !muOnlyUpdateTrack.first) continue;
 			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - glbTrack.innerTrack()->qoverp())/glbTrack.innerTrack()->qoverp());
@@ -632,20 +576,214 @@ HighPTMuonUtilities::selectBasedOnDxyPull(
 	return bestPair;
 }
 
-//
-// Testing
-//
 std::pair<Trajectory,Trajectory>
-HighPTMuonUtilities::selectBasedOnTEST(
+HighPTMuonUtilities::selectBasedOnTrackRank(
 		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
 		const reco::Muon& glbTrack) const
 		//const reco::Track& glbTrack) const
 {
-	//std::cout << "\nChoosing trajectory based on TEST" << std::endl;
-	int i(1);
-	double bestCurvPull = 999;
+	//std::cout << "\nChoosing trajectory based on max track rank" << std::endl;
+	//std::cout << "nHits * " << factor << " - chi^2\n" << std::endl;
+	int i(0);
+	double bestRank = -999.;
+	bool haveBestPair = false;
 	std::pair<Trajectory,Trajectory> bestPair;
-	double trkCurv = glbTrack.innerTrack()->qoverp();
+	//double trackerK = (*glbTrack.innerTrack()).qoverp();
+	//double trackerKerr = (*glbTrack.innerTrack()).qoverpError();
+	for (auto refit : refits) {
+		i++;
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyTrack = 
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot,false);
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
+
+			if (!muOnlyTrack.first or !muOnlyUpdateTrack.first) continue;
+			int nHits = muOnlyTraj.foundHits();
+			double thisRank = nHits*factor - muOnlyUpdateTraj.chiSquared();
+			if (fabs(muOnlyUpdateTrack.second.qoverpError()/muOnlyUpdateTrack.second.qoverp())>0.5) continue;
+			//double matchChi2 = pow((muOnlyUpdateTrack.second.qoverp() - trackerK),2)/(std::pow(trackerKerr,2) + std::pow(muOnlyUpdateTrack.second.qoverpError(),2));
+			//double thisRank = nHits*factor - muOnlyUpdateTraj.chiSquared() - matchChi2;
+			//std::cout << "thisRank " << thisRank << std::endl;
+			if (thisRank > bestRank) {
+				haveBestPair = true;
+				bestRank = thisRank;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+			//i++;
+		}
+	}
+	if (!haveBestPair) return std::make_pair(Trajectory(),Trajectory());
+	//std::cout << "bestRank " << bestRank << std::endl;
+	return bestPair;
+}
+
+//
+// Smallest |(k_ref - k_glb)/k_glb|
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnCurvPull(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Muon& glbTrack,
+		const std::string& refTrack) const
+		//const reco::Track& glbTrack) const
+{
+	//std::cout << "\nChoosing trajectory based on smallest curvature pull" << std::endl;
+	double bestPull = 999.;
+	double curvReference = -999.;
+	std::pair<Trajectory,Trajectory> bestPair;
+	if (refTrack=="tracker") curvReference = glbTrack.innerTrack()->qoverp();
+	else if (refTrack=="tuneP") curvReference = glbTrack.bestTrack()->qoverp();
+	else {std::cout << "Choose a valid refTrack for smallest curv pull" << std::endl; return bestPair;}
+	for (auto refit : refits) {
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			continue;
+		}
+		else if (muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
+
+			if (!muOnlyUpdateTrack.first) continue;
+			double thisPull = fabs((muOnlyUpdateTrack.second.qoverp() - curvReference)/curvReference);
+			//std::cout << "thisPull " << thisPull << std::endl;
+			if (thisPull < bestPull) {
+				bestPull = thisPull;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+
+		}
+	}
+	//std::cout << "bestPull " << bestPull << std::endl;
+	return bestPair;
+}
+
+//
+// Select based on smallest vtx+mu |delta(K)/K|
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnRelCurvErr(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Muon& glbTrack) const
+{
+	//std::cout << "\nChoosing smallest |delta(K)/K|" << std::endl;
+	int i(0);
+	double bestRelCurvErr = 9999.;
+	double refCurv = glbTrack.innerTrack()->qoverp();
+	std::pair<Trajectory,Trajectory> bestPair;
+	for (auto refit : refits) {
+		i++;
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid()) {
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
+
+			if (!muOnlyUpdateTrack.first) continue;
+			double thisRelCurvErr = fabs(muOnlyUpdateTrack.second.qoverp()/std::sqrt(muOnlyUpdateTrack.second.qoverpError()));
+			//std::cout << "a relCurvErr " << thisRelCurvErr << std::endl;
+			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - refCurv)/refCurv);
+			if (thisCurvPull > curvPullCut) continue;
+			if (thisRelCurvErr < bestRelCurvErr) {
+				bestRelCurvErr = thisRelCurvErr;
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+		}
+	}
+	//std::cout << "bestRank " << bestRank << std::endl;
+	return bestPair;
+}
+
+//
+// Closest combined tracker + mu-only vtx update track to gen
+// mu-only vtx update track is |deltaK/K| < 0.5
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnGEN(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Muon& glbTrack,
+		const reco::GenParticle& genMuon) const
+{
+	double gen_K = genMuon.charge()/genMuon.p();
+	//std::cout << "\nChoosing trajectory based on GEN" << std::endl;
+	double bestTrackPull = 999;
+	std::pair<Trajectory,Trajectory> bestPair;
+	bool haveBestPair = false;
+	for (auto refit : refits) {
+		Trajectory muOnlyTraj = refit.first;
+		Trajectory muOnlyUpdateTraj = refit.second;
+		// skip empty trajectories
+		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid() ||
+				muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
+			continue;
+		}
+		else {
+			std::pair<bool,reco::Track> muOnlyTrack = 
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot,false);
+			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
+
+			if (!muOnlyTrack.first || !muOnlyUpdateTrack.first) continue;
+			std::pair<double,double> comb = combineRet(*glbTrack.innerTrack(), muOnlyUpdateTrack.second);
+			double thisPull = (comb.first - gen_K) / gen_K;
+			//std::cout << "this pull " << thisPull << std::endl;
+
+			if (fabs(muOnlyUpdateTrack.second.ptError()/muOnlyUpdateTrack.second.pt())>0.5) continue;
+
+			if (fabs(thisPull) < fabs(bestTrackPull)) {
+				haveBestPair = true;
+				bestTrackPull = fabs(thisPull);
+				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+			}
+		}
+	}
+	//if (haveBestPair) std::cout << "best pull " << bestTrackPull << "\n" << std::endl;
+	//else std::cout << "no best pair" << "\n" << std::endl;
+	if (!haveBestPair) return std::make_pair(Trajectory(),Trajectory());
+	return bestPair;
+}
+
+//
+// Testing 1
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnTEST(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Muon& glbTrack,
+		const reco::GenParticle& genMuon) const
+		//const reco::Track& glbTrack) const
+{
+	double gen_K = genMuon.charge()/genMuon.p();
+	std::cout << "genMuon  K = " << gen_K
+		<< " pT = " << genMuon.pt()
+		<< " eta = " << genMuon.eta() 
+		<< " phi = " << genMuon.phi()
+		<< "\n" << std::endl;
+	//std::cout << "\nChoosing trajectory based on TEST" << std::endl;
+	int i(0);
+	int besti = -1;
+	double bestTrackRank = -999;
+	//double combK = -999;
+	//double combKerr = -999;
+	//double muVtxK = -999;
+	//double muVtxKerr = -999;
+	std::pair<Trajectory,Trajectory> bestPair;
+	bool haveBestPair = false;
 	printTrack(*glbTrack.innerTrack(),"tracker");
 	printTrack(*glbTrack.muonBestTrack(),"tuneP");
 	printTrack(*glbTrack.pickyTrack(),"picky");
@@ -653,6 +791,9 @@ HighPTMuonUtilities::selectBasedOnTEST(
 	printTrack(*glbTrack.tpfmsTrack(),"tpfms");
 	printTrack(*glbTrack.globalTrack(),"global");
 	printTrack(*glbTrack.outerTrack(),"standAlone");
+	std::cout << "----------" << std::endl;
+	//double trackerK = (*glbTrack.innerTrack()).qoverp();
+	//double trackerKerr = (*glbTrack.innerTrack()).qoverpError();
 	int nHits = 0;
 	for (trackingRecHit_iterator hit = (*glbTrack.globalTrack()).recHitsBegin(); hit != (*glbTrack.globalTrack()).recHitsEnd(); ++hit) {
 		if (!(*hit)->isValid()) continue;
@@ -662,35 +803,220 @@ HighPTMuonUtilities::selectBasedOnTEST(
 			nHits++;
 		}
 	}
-	std::cout << "----------" << std::endl;
 	for (auto refit : refits) {
+			i++;
 		Trajectory muOnlyTraj = refit.first;
 		Trajectory muOnlyUpdateTraj = refit.second;
 		// skip empty trajectories
 		if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid() ||
 				muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
-			i++;
 			continue;
 		}
 		else {
 			std::pair<bool,reco::Track> muOnlyTrack = 
-				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot);
+				buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot,false);
 			std::pair<bool,reco::Track> muOnlyUpdateTrack = 
-				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot);
+				buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
 
-			double thisCurvPull = fabs((muOnlyUpdateTrack.second.qoverp() - trkCurv)/trkCurv);
-			printComb(muOnlyUpdateTrack.second,muOnlyUpdateTraj,"refit",nHits,i);
-			//std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError> comb = 
+			if (!muOnlyTrack.first || !muOnlyUpdateTrack.first) continue;
+			int N = muOnlyTraj.foundHits();
+			double thisRank = N*factor - muOnlyUpdateTraj.chiSquared();
+			printComb(muOnlyUpdateTrack.second,muOnlyUpdateTraj,"vtx+mu",nHits,i);
+			std::cout << thisRank << " = " << N << "*" << factor << " - " << muOnlyUpdateTraj.chiSquared() << std::endl;
+			//std::pair<double,double> comb = combine(*glbTrack.innerTrack(), muOnlyUpdateTrack.second);
 			combine(*glbTrack.innerTrack(), muOnlyUpdateTrack.second);
 
-			if (thisCurvPull < bestCurvPull) {
-				bestCurvPull = thisCurvPull;
+			if (fabs(muOnlyUpdateTrack.second.ptError()/muOnlyUpdateTrack.second.pt())>0.5) continue;
+
+			if (thisRank > bestTrackRank) {
+				haveBestPair = true;
+				bestTrackRank = thisRank;
 				bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+				besti = i;
+				//combK = comb.first;
+				//combKerr = comb.second;
+				//muVtxK = muOnlyUpdateTrack.second.qoverp();
+				//muVtxKerr = muOnlyUpdateTrack.second.qoverpError();
 			}
-			i++;
 		}
 	}
+	if (!haveBestPair) return std::make_pair(Trajectory(),Trajectory());
+	std::cout << "\nChosen based on largest nHits*"<<factor<<" - chi2" << std::endl;
+	printComb(buildTrackFromTrajAtPCA(bestPair.second,*beamSpot,true).second,bestPair.second,"vtx+mu",nHits,besti);
+	combine(*glbTrack.innerTrack(),buildTrackFromTrajAtPCA(bestPair.second,*beamSpot,true).second);
+	//std::pair<double,double> comb = combine(*glbTrack.innerTrack(),buildTrackFromTrajAtPCA(bestPair.second,*beamSpot).second);
+	//std::cout << "\nSelected K-Kgen/sigma(K) = " << (combK - gen_K)/std::sqrt(combKerr) << std::endl;
+	//std::cout << "\ntuneP K-Kgen/sigma(K) = " << ( (*glbTrack.muonBestTrack()).qoverp() - gen_K )/ gen_K << std::endl;
+	//std::cout << "\nSelected K-Kgen/Kgen = " << (combK - gen_K)/gen_K << std::endl;
+	//std::cout << "\ntuneP K-Kgen/Kgen = " << ( (*glbTrack.muonBestTrack()).qoverp() - gen_K )/ gen_K << std::endl;
+	//double matchchi2 = pow((trackerK - muVtxK)/std::sqrt(trackerKerr*trackerKerr + muVtxKerr*muVtxKerr), 2);
+	//double res = (combK-gen_K)/std::sqrt(combKerr);
+	//double res = (combK-gen_K)/gen_K;
+	//std::cout << "FORPLOT " << res << " " << matchchi2 << std::endl;
 	return bestPair;
+}
+
+//
+// Testing 2
+//
+std::pair<Trajectory,Trajectory>
+HighPTMuonUtilities::selectBasedOnTEST_2(
+		const std::vector< std::pair<Trajectory,Trajectory> >& refits,
+		const reco::Muon& glbTrack,
+		const reco::GenParticle& genMuon) const
+		//const reco::Track& glbTrack) const
+{
+	std::vector<double> bestProb;
+	std::vector<double> bestChi2;
+	/*
+	double gen_K = genMuon.charge()/genMuon.p();
+	std::cout << "genMuon  K = " << gen_K
+		<< " pT = " << genMuon.pt()
+		<< " eta = " << genMuon.eta() 
+		<< " phi = " << genMuon.phi()
+		<< "\n" << std::endl;
+		*/
+	//std::cout << "\nChoosing trajectory based on TEST" << std::endl;
+	//int besti = -1;
+	double bestTrackRank = -999;
+	//double combK = -999;
+	//double combKerr = -999;
+	//double muVtxK = -999;
+	//double muVtxKerr = -999;
+	std::pair<Trajectory,Trajectory> bestPair;
+	bool haveBestPair = false;
+	/*
+	printTrack(*glbTrack.innerTrack(),"tracker");
+	printTrack(*glbTrack.muonBestTrack(),"tuneP");
+	printTrack(*glbTrack.pickyTrack(),"picky");
+	printTrack(*glbTrack.dytTrack(),"dyt");
+	printTrack(*glbTrack.tpfmsTrack(),"tpfms");
+	printTrack(*glbTrack.globalTrack(),"global");
+	printTrack(*glbTrack.outerTrack(),"standAlone");
+	std::cout << "----------" << std::endl;
+	*/
+	//double trackerK = (*glbTrack.innerTrack()).qoverp();
+	//double trackerKerr = (*glbTrack.innerTrack()).qoverpError();
+	int nHits = 0;
+	for (trackingRecHit_iterator hit = (*glbTrack.globalTrack()).recHitsBegin(); hit != (*glbTrack.globalTrack()).recHitsEnd(); ++hit) {
+		if (!(*hit)->isValid()) continue;
+		if ((*hit)->geographicalId().det() == DetId::Tracker) continue; // skip tracker
+		else if ((*hit)->geographicalId().det() == DetId::Muon) { // double check it's a muon hit
+			if ((*hit)->geographicalId().subdetId() == 3) continue; // skip RPC
+			nHits++;
+		}
+	}
+	for (int n=1; n<=nHits; n++) {
+		int i(0);
+		//int bestiN = -1;
+		bool haveBestPairN = false;
+		double bestTrackRankN = -999;
+		std::pair<Trajectory,Trajectory> bestPairN;
+		for (auto refit : refits) {
+			i++;
+			Trajectory muOnlyTraj = refit.first;
+			Trajectory muOnlyUpdateTraj = refit.second;
+			// skip empty trajectories
+			if (!muOnlyTraj.isValid() || !muOnlyUpdateTraj.isValid() ||
+					muOnlyTraj.empty() || muOnlyUpdateTraj.empty()) {
+				continue;
+			}
+			else {
+				std::pair<bool,reco::Track> muOnlyTrack = 
+					buildTrackFromTrajAtPCA(muOnlyTraj,*beamSpot,false);
+				std::pair<bool,reco::Track> muOnlyUpdateTrack = 
+					buildTrackFromTrajAtPCA(muOnlyUpdateTraj,*beamSpot,true);
+
+				if (!muOnlyTrack.first || !muOnlyUpdateTrack.first) continue;
+
+				int N = muOnlyTraj.foundHits();
+				if (n!=N) continue;
+
+				double thisRank = N*factor - muOnlyUpdateTraj.chiSquared();
+				//printComb(muOnlyUpdateTrack.second,muOnlyUpdateTraj,"vtx+mu",nHits,i);
+				//std::cout << thisRank << " = " << N << "*" << factor << " - " << muOnlyUpdateTraj.chiSquared() << std::endl;
+				//std::pair<double,double> comb = combine(*glbTrack.innerTrack(), muOnlyUpdateTrack.second);
+				//combine(*glbTrack.innerTrack(), muOnlyUpdateTrack.second);
+
+				if (fabs(muOnlyUpdateTrack.second.ptError()/muOnlyUpdateTrack.second.pt())>0.5) continue;
+
+				if (thisRank > bestTrackRank) {
+					// best overall pair
+					haveBestPair = true;
+					bestTrackRank = thisRank;
+					bestPair = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+					//besti = i;
+				}
+				if (thisRank > bestTrackRankN) {
+					// best pair for this nHits
+					haveBestPairN = true;
+					bestTrackRankN = thisRank;
+					bestPairN = std::make_pair(muOnlyTraj,muOnlyUpdateTraj);
+					//bestiN = i;
+					//combK = comb.first;
+					//combKerr = comb.second;
+					//muVtxK = muOnlyUpdateTrack.second.qoverp();
+					//muVtxKerr = muOnlyUpdateTrack.second.qoverpError();
+				}
+			}
+		} // end loop refits
+		// print best refit for this n
+		if (haveBestPairN) {
+			//printComb(buildTrackFromTrajAtPCA(bestPairN.second,*beamSpot,true).second,bestPairN.second,"vtx+mu",nHits,bestiN);
+			//combine(*glbTrack.innerTrack(),buildTrackFromTrajAtPCA(bestPairN.second,*beamSpot,true).second);
+			double prob = -log(TMath::Prob(buildTrackFromTrajAtPCA(bestPairN.second,*beamSpot,true).second.chi2(), buildTrackFromTrajAtPCA(bestPairN.second,*beamSpot,true).second.ndof()));
+			bestProb.push_back(prob);
+			bestChi2.push_back(buildTrackFromTrajAtPCA(bestPairN.second,*beamSpot,true).second.chi2());
+		}
+		else {
+			bestProb.push_back(-1);
+			bestChi2.push_back(-1);
+		}
+	} // end loop nHits
+	if (!haveBestPair) return std::make_pair(Trajectory(),Trajectory());
+	/*
+	std::cout << "\nChosen based on largest nHits*"<<factor<<" - chi2" << std::endl;
+	printComb(buildTrackFromTrajAtPCA(bestPair.second,*beamSpot,true).second,bestPair.second,"vtx+mu",nHits,besti);
+	combine(*glbTrack.innerTrack(),buildTrackFromTrajAtPCA(bestPair.second,*beamSpot,true).second);
+	*/
+	std::cout << "-ln(P) ";
+	for (double val : bestProb) std::cout << val << " ";
+	std::cout	<< std::endl;
+	std::cout << "chi2 ";
+	for (double val : bestChi2) std::cout << val << " ";
+	std::cout	<< std::endl;
+	//std::pair<double,double> comb = combine(*glbTrack.innerTrack(),buildTrackFromTrajAtPCA(bestPair.second,*beamSpot).second);
+	//std::cout << "\nSelected K-Kgen/sigma(K) = " << (combK - gen_K)/std::sqrt(combKerr) << std::endl;
+	//std::cout << "\ntuneP K-Kgen/sigma(K) = " << ( (*glbTrack.muonBestTrack()).qoverp() - gen_K )/ gen_K << std::endl;
+	//std::cout << "\nSelected K-Kgen/Kgen = " << (combK - gen_K)/gen_K << std::endl;
+	//std::cout << "\ntuneP K-Kgen/Kgen = " << ( (*glbTrack.muonBestTrack()).qoverp() - gen_K )/ gen_K << std::endl;
+	//double matchchi2 = pow((trackerK - muVtxK)/std::sqrt(trackerKerr*trackerKerr + muVtxKerr*muVtxKerr), 2);
+	//double res = (combK-gen_K)/std::sqrt(combKerr);
+	//double res = (combK-gen_K)/gen_K;
+	//std::cout << "FORPLOT " << res << " " << matchchi2 << std::endl;
+	return bestPair;
+}
+
+int HighPTMuonUtilities::calculateNDoF(const Trajectory& traj, const bool& bon, const bool& vtxUpdate) const {
+	int ndof = (vtxUpdate) ? 4 : 0;
+	int ndofBad = 0;
+	for (auto rechit : traj.recHits()) {
+    if((*rechit).isValid())
+      ndof += (*rechit).dimension();
+    else
+      ndofBad += (*rechit).dimension();
+	}
+	if(ndof) {
+		int constr = bon ? 5 : 4;
+		return std::max(ndof - constr, 0);
+	}
+	else {
+		// A STA can have < 5 (invalid) hits
+		// if this is the case ==> ndof = 1
+		// (to avoid divisions by 0)
+		int constr = bon ? 5 : 4;
+		return std::max(ndofBad - constr, 1);
+	}
 }
 
 //
@@ -728,10 +1054,14 @@ void HighPTMuonUtilities::printTSOS(const TrajectoryStateOnSurface& tsos) const 
 
 template <class T> // works with both reco::Track and reco::TrackRef
 void HighPTMuonUtilities::printTrack(const T& track, const std::string& name) const {
-	std::cout << std::setw(13) << std::left << name << " "
-		<< std::setw(10) << std::setprecision(4) << track.qoverp() << " "
-		<< std::setw(9) << std::setprecision(4) << track.qoverpError() << " "
-		<< std::setw(8) << std::setprecision(5) << track.chi2() << " ";
+		double prob = -log(TMath::Prob(track.chi2(), track.ndof()));
+	std::cout << std::setw(14) << std::left << name << " "
+		//<< std::setw(10) << std::setprecision(4) << track.qoverp() << " "
+		//<< std::setw(9) << std::setprecision(4) << track.qoverpError() << " "
+		<< std::setw(10) << std::setprecision(4) << track.pt() << " "
+		<< std::setw(9) << std::setprecision(4) << track.ptError() << " "
+		<< std::setw(8) << std::setprecision(5) << track.chi2() << " "
+		<< std::setw(8) << std::setprecision(5) << prob << " ";
 	for (trackingRecHit_iterator hit = track.recHitsBegin(); hit != track.recHitsEnd(); ++hit) {
 		if ((*hit)->geographicalId().det() == DetId::Tracker) continue; // skip tracker
     DetId id = (*hit)->geographicalId();
@@ -754,10 +1084,14 @@ void HighPTMuonUtilities::printTrack(const T& track, const std::string& name) co
 
 template <class T> // works with both reco::Track and reco::TrackRef
 void HighPTMuonUtilities::printComb(const T& track, const Trajectory& traj, const std::string& name, const int& nHits, const int& hitMaskOption) const {
+		double prob = -log(TMath::Prob(track.chi2(), track.ndof()));
 	std::cout <<  name << " " << std::setw(2) << std::left << hitMaskOption << " " <<std::setw(4) << std::left << hitMaskPrint(nHits,hitMaskOption) << " "
-		<< std::setw(10) << std::setprecision(4) << track.qoverp() << " "
-		<< std::setw(9) << std::setprecision(4) << track.qoverpError() << " "
-		<< std::setw(7) << std::setprecision(5) << track.chi2() << " ";
+		//<< std::setw(10) << std::setprecision(4) << track.qoverp() << " "
+		//<< std::setw(9) << std::setprecision(4) << track.qoverpError() << " "
+		<< std::setw(10) << std::setprecision(4) << track.pt() << " "
+		<< std::setw(9) << std::setprecision(4) << track.ptError() << " "
+		<< std::setw(7) << std::setprecision(5) << track.chi2() << " "
+		<< std::setw(7) << std::setprecision(5) << prob << " ";
 	for (auto hit : traj.recHits()) {
 		if ((*hit).geographicalId().det() == DetId::Tracker) continue; // skip tracker
     DetId id = (*hit).geographicalId();
@@ -799,11 +1133,17 @@ HighPTMuonUtilities::hitMaskPrint(const int& nHits, const int& hitOption) const 
 	return hitMaskStream.str();
 }
 
-//std::pair<CurvilinearTrajectoryParameters,CurvilinearTrajectoryError>
 void HighPTMuonUtilities::combine(const reco::Track& tracker, const reco::Track& refit) const {
 	// Combination of two correlated 5D estimates
 	// Using notation from 
 	// https://www.sciencedirect.com/science/article/pii/S0168900203003292
+	typedef	ROOT::Math::SMatrix<double,4,5,ROOT::Math::MatRepStd<double,4,5>> Matrix45;
+	typedef	ROOT::Math::SMatrix<double,4,4,ROOT::Math::MatRepStd<double,4,4>> Matrix44;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepStd<double,5,5>> Matrix55;
+	typedef	ROOT::Math::SMatrix<double,5,4,ROOT::Math::MatRepStd<double,5,4>> Matrix54;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepSym<double,5>> SymMatrix55;
+	typedef	ROOT::Math::SVector<double,4> Vector4;
+	typedef	ROOT::Math::SVector<double,5> Vector5;
 
 	AlgebraicSymMatrix55 covTrk = tracker.covariance();
 	AlgebraicVector5 parTrk = tracker.parameters();
@@ -811,11 +1151,6 @@ void HighPTMuonUtilities::combine(const reco::Track& tracker, const reco::Track&
 	AlgebraicSymMatrix55 covRef = refit.covariance();
 	AlgebraicVector5 parRef = refit.parameters();
 
-	typedef ROOT::Math::SMatrix< double,10,10,ROOT::Math::MatRepSym<double,  10> > Matrix1010;
-	typedef ROOT::Math::SMatrix< double,10, 5,ROOT::Math::MatRepStd<double,10,5> > Matrix105;
-	typedef ROOT::Math::SMatrix< double, 5,10,ROOT::Math::MatRepStd<double,5,10> > Matrix510;
-	typedef ROOT::Math::SMatrix< double, 5, 5,ROOT::Math::MatRepStd<double,5, 5> > Matrix55;
-	typedef ROOT::Math::SVector< double,10> Vector10;
 
 	// Set 10x1 measurement vector
 	Vector10 y;
@@ -825,7 +1160,7 @@ void HighPTMuonUtilities::combine(const reco::Track& tracker, const reco::Track&
 	}
 
 	// Set 10x10 covariance matrix
-	Matrix1010 M;
+	Matrix1010 M; // this matrix is symmetric
 	for (int i=0; i<5; i++) {
 		for (int j=0; j<5; j++) {
 			if (j>i) continue;
@@ -876,12 +1211,23 @@ void HighPTMuonUtilities::combine(const reco::Track& tracker, const reco::Track&
 	AlgebraicSymMatrix55 sumCovInv = sumCov;
 	if (!sumCovInv.Invert()) std::cout << "Cannot invert trk+ref cov matrix" << std::endl;
 	double chi2 = ROOT::Math::Similarity(parRef-parTrk,sumCovInv);
+	int q = (parComb[0]>0) ? 1:-1;
+	double p = 1./fabs(parComb[0]);
+	double pT = std::cos(parComb[1])*p;
+	double pZ = std::sin(parComb[1])*p;
+	double pTError = std::sqrt(pT*pT * p*p/q/q*covComb[0][0]
+													+ 2*pT*p/q*pZ * covComb[0][1]
+													+	pZ*pZ*covComb[1][1]);
 
-	std::cout << std::setw(13) << std::left << "combine" << " "
-		<< std::setw(10) << std::setprecision(4) << parComb[0] << " "
-		<< std::setw(9)  << std::setprecision(4) << std::sqrt(covComb[0][0]) << " "
+	std::cout << std::setw(14) << std::left << "combine" << " "
+		//<< std::setw(10) << std::setprecision(4) << parComb[0] << " " // K = q/p
+		//<< std::setw(9)  << std::setprecision(4) << std::sqrt(covComb[0][0]) << " "
+		<< std::setw(10) << std::setprecision(4) << pT << " " // pT = cos(lambda)/p
+		<< std::setw(9)  << std::setprecision(4) << pTError << " "
 		<< std::setw(7)  << std::setprecision(5) << chi2 << " "
 		<< "\n" << std::endl;
+
+	//return std::make_pair(parComb[0],covComb[0][0]);
 	
 	// double check with no correlation combination
 	/*
@@ -899,4 +1245,81 @@ void HighPTMuonUtilities::combine(const reco::Track& tracker, const reco::Track&
 		<< std::setw(7)  << std::setprecision(5) << chi2 << " " 
 		<< "\n" << std::endl;
 	*/
+}
+
+std::pair<double,double> HighPTMuonUtilities::combineRet(const reco::Track& tracker, const reco::Track& refit) const {
+	// Combination of two correlated 5D estimates
+	// Using notation from 
+	// https://www.sciencedirect.com/science/article/pii/S0168900203003292
+	typedef	ROOT::Math::SMatrix<double,4,5,ROOT::Math::MatRepStd<double,4,5>> Matrix45;
+	typedef	ROOT::Math::SMatrix<double,4,4,ROOT::Math::MatRepStd<double,4,4>> Matrix44;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepStd<double,5,5>> Matrix55;
+	typedef	ROOT::Math::SMatrix<double,5,4,ROOT::Math::MatRepStd<double,5,4>> Matrix54;
+	typedef	ROOT::Math::SMatrix<double,5,5,ROOT::Math::MatRepSym<double,5>> SymMatrix55;
+	typedef	ROOT::Math::SVector<double,4> Vector4;
+	typedef	ROOT::Math::SVector<double,5> Vector5;
+
+	AlgebraicSymMatrix55 covTrk = tracker.covariance();
+	AlgebraicVector5 parTrk = tracker.parameters();
+
+	AlgebraicSymMatrix55 covRef = refit.covariance();
+	AlgebraicVector5 parRef = refit.parameters();
+
+
+	// Set 10x1 measurement vector
+	Vector10 y;
+	for (int i=0; i<5; i++) {
+		y(i) = parRef(i);
+		y(i+5) = parTrk(i);
+	}
+
+	// Set 10x10 covariance matrix
+	Matrix1010 M; // this matrix is symmetric
+	for (int i=0; i<5; i++) {
+		for (int j=0; j<5; j++) {
+			if (j>i) continue;
+			// Upper left block is refit covariance
+			M(i,j) = covRef(i,j);
+			// Bottom right block is tracker covariance
+			M(i+5,j+5) = covTrk(i,j);
+		}
+	}
+	// Off diagional blocks are correlation between tracker and refit
+	for (int i=0; i<5; i++) {
+		for (int j=0; j<5; j++) {
+			if (i==0 || j==0) {
+				M(i,j+5) = 0.; // zero curvature correlation
+				continue;
+			}
+			// correlation = 1 for all other parameters
+			M(i,j+5) = std::sqrt(covRef(i,i)) * std::sqrt(covTrk(j,j));
+		}
+	}
+	Matrix1010 Minv = M;
+	if (!Minv.Invert()) std::cout << "Cannot invert 10x10 trk+ref covariance matrix" << std::endl;
+
+	// Define U projection matrix
+	Matrix105 U;
+	U(0,0) = 1.; U(0,1) = 0.; U(0,2) = 0.; U(0,3) = 0.; U(0,4) = 0.;
+	U(1,0) = 0.; U(1,1) = 1.; U(1,2) = 0.; U(1,3) = 0.; U(1,4) = 0.;
+	U(2,0) = 0.; U(2,1) = 0.; U(2,2) = 1.; U(2,3) = 0.; U(2,4) = 0.;
+	U(3,0) = 0.; U(3,1) = 0.; U(3,2) = 0.; U(3,3) = 1.; U(3,4) = 0.;
+	U(4,0) = 0.; U(4,1) = 0.; U(4,2) = 0.; U(4,3) = 0.; U(4,4) = 1.;
+	U(5,0) = 1.; U(5,1) = 0.; U(5,2) = 0.; U(5,3) = 0.; U(5,4) = 0.;
+	U(6,0) = 0.; U(6,1) = 1.; U(6,2) = 0.; U(6,3) = 0.; U(6,4) = 0.;
+	U(7,0) = 0.; U(7,1) = 0.; U(7,2) = 1.; U(7,3) = 0.; U(7,4) = 0.;
+	U(8,0) = 0.; U(8,1) = 0.; U(8,2) = 0.; U(8,3) = 1.; U(8,4) = 0.;
+	U(9,0) = 0.; U(9,1) = 0.; U(9,2) = 0.; U(9,3) = 0.; U(9,4) = 1.;
+	Matrix510 UT = ROOT::Math::Transpose(U);
+
+	Matrix55 UTMinvU = UT*(Minv*U);
+	Matrix55 covComb = UTMinvU;
+	if (!covComb.Invert()) 
+		std::cout << "Cannot invert UT*Minv*U to get combined covariance matrix" << std::endl;
+	Matrix510 UTMinv = UT*Minv;
+
+	AlgebraicVector5 parComb = (covComb*UTMinv)*y;
+
+	return std::make_pair(parComb[0],covComb[0][0]);
+	
 }

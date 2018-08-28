@@ -596,6 +596,8 @@ MuonTrackLoader::loadTracks(const TrajectoryContainer& trajectories,
     
     // take the "bare" track at PCA
     reco::Track &track = resultOfTrackExtrapAtPCA.second;
+		//std::cout << instance << " " << track.qoverp() << " " << track.qoverpError() << std::endl;
+		//std::cout << "glbRef " << (*glbRef).qoverp() << " " << instance << track.qoverp() << std::endl;
     
     // build the "bare" track extra from the trajectory
     reco::TrackExtra trackExtra = buildTrackExtra( trajectory );

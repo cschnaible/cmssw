@@ -10,6 +10,7 @@ highPTMuons = cms.EDProducer("HighPTMuonProducer",
 	#    InputTag MuonCollectionLabel = standAloneMuons:UpdatedAtVtx
 	MuonServiceProxy,
 	MuonCollectionLabel = cms.InputTag("globalMuons"),
+	BaseTrackType = cms.string('global'),
 	RecoMuonCollectionLabel = cms.InputTag("muons"),
 	GenParticleCollectionLabel = cms.InputTag("genParticles"),
 	dRcut = cms.double(0.3),
@@ -27,5 +28,6 @@ highPTMuons = cms.EDProducer("HighPTMuonProducer",
 	UtilitiesParameters = cms.PSet(
 		HighPTMuonUtilities
 	),
+	beamSpot = cms.InputTag('offlineBeamSpot'),
 )
 
